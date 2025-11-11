@@ -3,6 +3,15 @@ import { TextDecoder } from 'util';
 import * as vscode from 'vscode';
 import Ajv, { ErrorObject, ValidateFunction } from 'ajv';
 import { findNodeAtLocation, Node, parseTree } from 'jsonc-parser';
+const draft07 = require('ajv/dist/refs/json-schema-draft-07.json');
+const draft2020 = require('ajv/dist/refs/json-schema-2020-12/schema.json');
+const draft2020Applicator = require('ajv/dist/refs/json-schema-2020-12/meta/applicator.json');
+const draft2020Content = require('ajv/dist/refs/json-schema-2020-12/meta/content.json');
+const draft2020Core = require('ajv/dist/refs/json-schema-2020-12/meta/core.json');
+const draft2020Format = require('ajv/dist/refs/json-schema-2020-12/meta/format-annotation.json');
+const draft2020MetaData = require('ajv/dist/refs/json-schema-2020-12/meta/meta-data.json');
+const draft2020Unevaluated = require('ajv/dist/refs/json-schema-2020-12/meta/unevaluated.json');
+const draft2020Validation = require('ajv/dist/refs/json-schema-2020-12/meta/validation.json');
 
 const pointerSegmentRegex = /~[01]/g;
 
@@ -30,23 +39,60 @@ interface SchemaResolution {
   pointer: string;
 }
 
+export interface SchemaInsight {
+  id: string;
+  message: string;
+  pointer: string;
+  path: JsonPath;
+  severity: vscode.DiagnosticSeverity;
+  keyword: string;
+}
+
 export class SchemaValidator {
   private readonly ajv = new Ajv({ allErrors: true, strict: false, allowUnionTypes: true });
   private readonly decoder = new TextDecoder('utf-8');
   private readonly validatorCache = new Map<string, { fingerprint: string; validator: ValidateFunction }>();
   private readonly warnedMessages = new Set<string>();
   private readonly schemaInfoByDocument = new Map<string, SchemaInfo>();
+  private readonly schemaInsightsByDocument = new Map<string, SchemaInsight[]>();
+
+  constructor() {
+    [
+      draft07,
+      draft2020Applicator,
+      draft2020Content,
+      draft2020Core,
+      draft2020Format,
+      draft2020MetaData,
+      draft2020Unevaluated,
+      draft2020Validation,
+      draft2020
+    ].forEach((schema) => this.addMetaSchemaSafe(schema));
+  }
 
   public reset() {
     this.validatorCache.clear();
     this.warnedMessages.clear();
     this.schemaInfoByDocument.clear();
+    this.schemaInsightsByDocument.clear();
+  }
+
+  private addMetaSchemaSafe(meta: unknown) {
+    if (!meta || typeof meta !== 'object' || this.ajv.getSchema((meta as { $id?: string }).$id ?? '')) {
+      return;
+    }
+    try {
+      this.ajv.addMetaSchema(meta as object);
+    } catch {
+      // ignore
+    }
   }
 
   public async validate(document: vscode.TextDocument, root: Node | undefined, data: unknown): Promise<vscode.Diagnostic[]> {
     const config = vscode.workspace.getConfiguration('jsonAtlas', document.uri);
 
     this.schemaInfoByDocument.delete(document.uri.toString());
+    this.schemaInsightsByDocument.delete(document.uri.toString());
 
     if (!config.get<boolean>('enableSchemaValidation')) {
       return [];
@@ -83,11 +129,15 @@ export class SchemaValidator {
     }
 
     const valid = validator(data);
-    if (valid || !validator.errors?.length) {
+    const errors = validator.errors ?? [];
+    const insights = this.buildInsightsFromErrors(errors);
+    this.schemaInsightsByDocument.set(document.uri.toString(), insights);
+
+    if (valid || !errors.length) {
       return [];
     }
 
-    return validator.errors.map((error) => this.createDiagnostic(error, document, root));
+    return errors.map((error) => this.createDiagnostic(error, document, root));
   }
 
   private resolveSchemaUri(document: vscode.TextDocument, schemaPath: string): vscode.Uri | undefined {
@@ -223,6 +273,38 @@ export class SchemaValidator {
 
   public getSchemaInfo(documentUri: vscode.Uri): SchemaInfo | undefined {
     return this.schemaInfoByDocument.get(documentUri.toString());
+  }
+
+  public getSchemaInsights(documentUri: vscode.Uri): SchemaInsight[] {
+    return this.schemaInsightsByDocument.get(documentUri.toString()) ?? [];
+  }
+
+  private buildInsightsFromErrors(errors: ErrorObject[]): SchemaInsight[] {
+    if (!errors?.length) {
+      return [];
+    }
+
+    const insights: SchemaInsight[] = [];
+    for (const error of errors) {
+      const pointer = error.instancePath ?? '';
+      const path = this.pointerToPath(pointer);
+      const message = this.formatErrorMessage(error);
+      const keyword = error.keyword ?? 'schema';
+      const severity =
+        keyword === 'required' || keyword === 'deprecated'
+          ? vscode.DiagnosticSeverity.Warning
+          : vscode.DiagnosticSeverity.Error;
+      const id = `${pointer ?? ''}::${keyword}::${message}`;
+      insights.push({
+        id,
+        message,
+        pointer,
+        path,
+        severity,
+        keyword
+      });
+    }
+    return insights;
   }
 
   private resolveSchemaForPath(info: SchemaInfo, path: JsonPath | undefined): SchemaResolution | undefined {

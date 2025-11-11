@@ -138,6 +138,7 @@ export class VisualizerPanel {
         VisualizerPanel.currentPanel.applySchemaPointerUpdate(pointers);
     }
 
+
     public static focusRoot(documentUri: vscode.Uri) {
         if (!VisualizerPanel.currentPanel?.isForDocument(documentUri)) {
             return;
@@ -532,6 +533,7 @@ export class VisualizerPanel {
             void vscode.window.showErrorMessage(`Failed to open schema definition: ${message}`);
         }
     }
+
 
     private postChatModelConfig() {
         if (!this.isWebviewReady) {
@@ -1138,8 +1140,8 @@ export class VisualizerPanel {
         const webview = this.panel.webview;
         const scriptUri = this.getUri(['media', 'visualizer.js']);
         const stylesUri = this.getUri(['media', 'visualizer.css']);
-        const controlsIconUri = this.getUri(['media', 'icons', 'controls.svg']);
-        const chatIconUri = this.getUri(['media', 'icons', 'bot.svg']);
+        const controlsIconUri = this.getUri(['media', 'icons', 'controls.png']);
+        const chatIconUri = this.getUri(['media', 'icons', 'bot.png']);
 
         return `<!DOCTYPE html>
 <html lang="en">
@@ -1218,7 +1220,7 @@ export class VisualizerPanel {
           <img src="${this.getUri([
               'media',
               'icons',
-              'brain.svg',
+              'brain.png',
           ])}" width="20" height="20" alt="" aria-hidden="true" />
           <select id="chatModelSelect" disabled aria-label="Select AI model">
             <option>Loading…</option>

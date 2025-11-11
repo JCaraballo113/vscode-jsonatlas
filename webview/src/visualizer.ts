@@ -280,6 +280,7 @@
     });
   }
 
+
   setControlsCollapsed(controlsCollapsed, { persist: false });
 
   container.addEventListener('click', handleContainerClick);
@@ -417,6 +418,7 @@
       });
     });
   }
+
 
   function persistState(options = { savePositions: true }) {
     if (options.savePositions !== false && currentDocumentId) {

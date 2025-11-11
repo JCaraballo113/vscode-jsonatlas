@@ -41,12 +41,12 @@
     "contributes": {
         "commands": [
             {
-                "command": "jsonAtlas.showVisualizer",
-                "title": "JSON Atlas: Show Visualizer",
-                "category": "JSON Atlas",
-                "icon": {
-                    "light": "media/icons/atlas.svg",
-                    "dark": "media/icons/atlas.svg"
+                    "command": "jsonAtlas.showVisualizer",
+                    "title": "JSON Atlas: Show Visualizer",
+                    "category": "JSON Atlas",
+                    "icon": {
+                    "light": "media/icons/atlas.png",
+                    "dark": "media/icons/atlas.png"
                 }
             },
             {
@@ -101,6 +101,12 @@
                     "id": "jsonAtlas.summaryView",
                     "name": "Summary",
                     "type": "webview"
+                },
+                {
+                    "id": "jsonAtlas.schemaInsightsView",
+                    "name": "Schema Insights",
+                    "type": "webview",
+                    "icon": "media/icons/insight.png"
                 }
             ]
         },
@@ -207,6 +213,18 @@
                     ],
                     "markdownDescription": "Glob patterns (relative to the workspace) that prevent the Visualizer from auto-opening for matching JSON files. Manual commands still work.",
                     "description": "Files matching these globs won't auto-trigger the visualizer."
+                },
+                "jsonAtlas.insightExcludeGlobs": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "default": [
+                        "**/.vscode/**",
+                        "**/*.schema.json"
+                    ],
+                    "markdownDescription": "Glob patterns for JSON files that should be ignored by the Schema Insights panel. Editor diagnostics still run.",
+                    "description": "Files matching these globs won't populate the Schema Insights panel automatically."
                 },
                 "jsonAtlas.autoGenerateSummary": {
                     "type": "boolean",

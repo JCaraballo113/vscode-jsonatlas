@@ -1,14 +1,10 @@
 import { createHash } from 'crypto';
 import { minimatch } from 'minimatch';
 import * as vscode from 'vscode';
-import { findNodeAtOffset, getLocation, getNodeValue, Node, parseTree, ParseError, ParseOptions, printParseErrorCode } from 'jsonc-parser';
-import {
-  GraphLayoutPreset,
-  VisualizerPanel,
-  VisualizerSchemaPointerEntry,
-  VisualizerSelectionInfo
-} from './visualizerPanel';
-import { SchemaNavigationTarget, SchemaValidator } from './schemaValidator';
+import { findNodeAtLocation, findNodeAtOffset, getLocation, getNodeValue, Node, parseTree, ParseError, ParseOptions, printParseErrorCode } from 'jsonc-parser';
+import { GraphLayoutPreset, VisualizerPanel, VisualizerSchemaPointerEntry, VisualizerSelectionInfo } from './visualizerPanel';
+import { SchemaInsight, SchemaNavigationTarget, SchemaValidator } from './schemaValidator';
+import { SchemaInsightsViewProvider, VisualizerSchemaInsight } from './schemaInsightsView';
 import { AiService, EditProposal } from './aiService';
 import { SummaryViewProvider } from './summaryView';
 
@@ -22,10 +18,12 @@ const summaryCache = new Map<string, SummaryCacheEntry>();
 const selectionFragmentDocs = new Set<string>();
 const lastFocusedPathByDocument = new Map<string, string>();
 const schemaPointerCache = new Map<string, Map<string, VisualizerSchemaPointerEntry>>();
+const schemaInsightsCache = new Map<string, VisualizerSchemaInsight[]>();
 
 let diagnostics: vscode.DiagnosticCollection;
 let aiService: AiService;
 let summaryViewProvider: SummaryViewProvider;
+let schemaInsightsProvider: SchemaInsightsViewProvider;
 let outputChannel: vscode.OutputChannel;
 interface AnalysisSnapshot {
   root: Node | undefined;
@@ -44,6 +42,7 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(outputChannel);
   aiService = new AiService(context);
   summaryViewProvider = new SummaryViewProvider(context.extensionUri, aiService);
+  schemaInsightsProvider = new SchemaInsightsViewProvider(context.extensionUri);
 
   if (vscode.window.activeTextEditor) {
     const document = vscode.window.activeTextEditor.document;
@@ -68,6 +67,8 @@ export function activate(context: vscode.ExtensionContext) {
       analysisCache.delete(key);
       schemaPointerCache.delete(key);
       VisualizerPanel.updateSchemaPointers(document.uri, undefined);
+      schemaInsightsCache.delete(key);
+      schemaInsightsProvider.clearInsights(document.uri);
       invalidateSummaryCacheForDocument(document.uri);
       selectionFragmentDocs.delete(key);
       lastFocusedPathByDocument.delete(key);
@@ -88,6 +89,11 @@ export function activate(context: vscode.ExtensionContext) {
         schemaPointerCache.clear();
         for (const uri of affectedUris) {
           VisualizerPanel.updateSchemaPointers(uri, undefined);
+        }
+        const insightUris = Array.from(schemaInsightsCache.keys()).map((key) => vscode.Uri.parse(key));
+        schemaInsightsCache.clear();
+        for (const uri of insightUris) {
+          schemaInsightsProvider.clearInsights(uri);
         }
         if (vscode.window.activeTextEditor) {
           void refreshDiagnostics(vscode.window.activeTextEditor.document);
@@ -134,9 +140,16 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     summaryViewProvider,
     vscode.window.registerWebviewViewProvider(SummaryViewProvider.viewId, summaryViewProvider),
+    schemaInsightsProvider,
+    vscode.window.registerWebviewViewProvider(SchemaInsightsViewProvider.viewId, schemaInsightsProvider),
     vscode.languages.registerHoverProvider(Array.from(SUPPORTED_LANGUAGES), {
       provideHover(document, position) {
         return provideSchemaHover(document, position);
+      }
+    }),
+    vscode.languages.registerCodeLensProvider(Array.from(SUPPORTED_LANGUAGES), {
+      provideCodeLenses(document) {
+        return provideSchemaCodeLenses(document);
       }
     })
   );
@@ -155,6 +168,7 @@ async function refreshDiagnostics(document: vscode.TextDocument): Promise<void> 
     analysisCache.delete(cacheKey);
     schemaPointerCache.delete(cacheKey);
     VisualizerPanel.updateSchemaPointers(document.uri, undefined);
+    schemaInsightsCache.delete(cacheKey);
     diagnostics.set(document.uri, buildDiagnosticsFromErrors(document, analysis.errors));
     const first = analysis.errors[0];
     const location = document.positionAt(first.offset);
@@ -166,15 +180,20 @@ async function refreshDiagnostics(document: vscode.TextDocument): Promise<void> 
   const snapshot: AnalysisSnapshot = { root: analysis.root, data: analysis.data };
   analysisCache.set(cacheKey, snapshot);
   const selectionPayload = buildRenderablePayload(document, snapshot, getSelectionsForDocument(document));
+  const schemaIssues = await schemaValidator.validate(document, analysis.root, analysis.data);
+  diagnostics.set(document.uri, schemaIssues);
+  const schemaInsights = schemaValidator.getSchemaInsights(document.uri);
+  const insightsPayload = buildVisualizerSchemaInsights(document, analysis.root, schemaInsights);
+  schemaInsightsCache.set(cacheKey, insightsPayload);
+  if (shouldDisplayInsights(document)) {
+    schemaInsightsProvider.setInsights(document, insightsPayload);
+  }
+  rebuildSchemaPointers(document, analysis.root);
   VisualizerPanel.updateIfActive(document.uri, selectionPayload.data, selectionPayload.selection, {
     schemaPointers: selectionPayload.schemaPointers,
     layoutPreset: getConfiguredLayoutPreset(document)
   });
   recordSelectionFragmentState(document.uri, selectionPayload.selection);
-
-  const schemaIssues = await schemaValidator.validate(document, analysis.root, analysis.data);
-  diagnostics.set(document.uri, schemaIssues);
-  rebuildSchemaPointers(document, analysis.root);
 }
 
 async function handleVisualizerCommand(context: vscode.ExtensionContext) {
@@ -198,6 +217,15 @@ async function handleVisualizerCommand(context: vscode.ExtensionContext) {
   const snapshot: AnalysisSnapshot = { root: analysis.root, data: analysis.data };
   analysisCache.set(editor.document.uri.toString(), snapshot);
   const selectionPayload = buildRenderablePayload(editor.document, snapshot, editor.selections);
+  const insightsPayload = buildVisualizerSchemaInsights(
+    editor.document,
+    snapshot.root,
+    schemaValidator.getSchemaInsights(editor.document.uri)
+  );
+  schemaInsightsCache.set(editor.document.uri.toString(), insightsPayload);
+  if (shouldDisplayInsights(editor.document)) {
+    schemaInsightsProvider.setInsights(editor.document, insightsPayload);
+  }
   VisualizerPanel.render(
     context.extensionUri,
     selectionPayload.data,
@@ -629,6 +657,35 @@ function buildSchemaPointerMap(
   return result.size ? result : undefined;
 }
 
+function buildVisualizerSchemaInsights(
+  document: vscode.TextDocument,
+  root: Node | undefined,
+  insights: SchemaInsight[]
+): VisualizerSchemaInsight[] {
+  if (!root || !insights.length) {
+    return [];
+  }
+
+  const result: VisualizerSchemaInsight[] = [];
+  for (const insight of insights) {
+    const node = findNodeAtLocation(root, insight.path);
+    const startLine = node ? document.positionAt(node.offset).line : undefined;
+    const endLine = node ? document.positionAt(node.offset + node.length).line : startLine;
+    const pathKey = insight.path.length ? encodeVisualizerPath(insight.path) : undefined;
+    result.push({
+      id: insight.id,
+      message: insight.message,
+      severity: insight.severity === vscode.DiagnosticSeverity.Warning ? 'warning' : 'error',
+      jsonPath: formatJsonPath(insight.path),
+      pointer: insight.pointer,
+      pathKey,
+      startLine,
+      endLine
+    });
+  }
+  return result;
+}
+
 function handleSelectionChange(editor: vscode.TextEditor) {
   if (!isLintableDocument(editor.document)) {
     return;
@@ -806,6 +863,29 @@ async function provideSchemaHover(document: vscode.TextDocument, position: vscod
   return new vscode.Hover(markdown);
 }
 
+async function provideSchemaCodeLenses(document: vscode.TextDocument): Promise<vscode.CodeLens[]> {
+  if (!isLintableDocument(document) || !isSchemaValidationEnabled(document)) {
+    return [];
+  }
+
+  const analysis = getOrComputeAnalysis(document);
+  if (!analysis?.root) {
+    return [];
+  }
+
+  const ready = await ensureSchemaNavigationData(document);
+  if (!ready) {
+    return [];
+  }
+
+  const pointerMap = schemaPointerCache.get(document.uri.toString());
+  if (!pointerMap || !pointerMap.size) {
+    return [];
+  }
+
+  return buildSchemaCodeLenses(document, analysis.root, pointerMap);
+}
+
 async function handleGoToSchemaDefinitionCommand(args?: GoToSchemaDefinitionCommandArgs): Promise<void> {
   const argUri = typeof args?.documentUri === 'string' ? vscode.Uri.parse(args.documentUri) : undefined;
   const activeEditor = vscode.window.activeTextEditor;
@@ -893,6 +973,28 @@ function getConfiguredLayoutPreset(document: vscode.TextDocument): GraphLayoutPr
   return 'balanced';
 }
 
+function shouldDisplayInsights(document: vscode.TextDocument): boolean {
+  if (!isLintableDocument(document)) {
+    return false;
+  }
+  if (document.uri.scheme !== 'file') {
+    return false;
+  }
+  const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
+  if (!workspaceFolder) {
+    return false;
+  }
+
+  const config = vscode.workspace.getConfiguration('jsonAtlas', document.uri);
+  const patterns = config.get<string[]>('insightExcludeGlobs', ['**/.vscode/**', '**/*.schema.json']);
+  if (!Array.isArray(patterns) || !patterns.length) {
+    return true;
+  }
+
+  const relative = vscode.workspace.asRelativePath(document.uri, false);
+  return !patterns.some((pattern) => minimatch(relative, pattern, { nocase: true, dot: true, matchBase: true }));
+}
+
 async function ensureSchemaNavigationData(document: vscode.TextDocument): Promise<boolean> {
   if (!isLintableDocument(document) || !isSchemaValidationEnabled(document)) {
     return false;
@@ -920,6 +1022,64 @@ async function ensureSchemaNavigationData(document: vscode.TextDocument): Promis
   }
 
   return schemaPointerCache.has(key);
+}
+
+function buildSchemaCodeLenses(
+  document: vscode.TextDocument,
+  root: Node,
+  pointerMap: Map<string, VisualizerSchemaPointerEntry>
+): vscode.CodeLens[] {
+  const lenses: vscode.CodeLens[] = [];
+
+  const visit = (node: Node, path: JsonPath) => {
+    if (node.type === 'object' || node.type === 'array') {
+      const key = encodeVisualizerPath(path);
+      const entry = pointerMap.get(key);
+      if (entry) {
+        const schemaTitle = entry.title?.trim();
+        const lensTitle = schemaTitle ? `Schema · ${schemaTitle}` : 'Schema definition';
+        const start = document.positionAt(node.offset);
+        const range = new vscode.Range(start, start);
+        const commandArgs: GoToSchemaDefinitionCommandArgs = {
+          documentUri: document.uri.toString(),
+          path: path.slice()
+        };
+        lenses.push(
+          new vscode.CodeLens(range, {
+            title: lensTitle,
+            tooltip: entry.description || entry.pointer || 'Open schema definition',
+            command: 'jsonAtlas.goToSchemaDefinition',
+            arguments: [commandArgs]
+          })
+        );
+      }
+    }
+
+    if (node.type === 'object') {
+      for (const property of node.children ?? []) {
+        if (property.type !== 'property' || !property.children || property.children.length < 2) {
+          continue;
+        }
+        const keyNode = property.children[0];
+        const valueNode = property.children[1];
+        const key = extractPropertyKey(keyNode);
+        if (typeof key === 'undefined') {
+          continue;
+        }
+        visit(valueNode, path.concat([key]));
+      }
+      return;
+    }
+
+    if (node.type === 'array') {
+      (node.children ?? []).forEach((child, index) => {
+        visit(child, path.concat([index]));
+      });
+    }
+  };
+
+  visit(root, []);
+  return lenses;
 }
 
 function log(message: string) {

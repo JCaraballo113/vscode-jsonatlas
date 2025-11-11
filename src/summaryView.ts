@@ -298,7 +298,7 @@ export class SummaryViewProvider implements vscode.WebviewViewProvider, vscode.D
     <h1>${escapedTitle}</h1>
     <div class="summary-actions">
       <div class="summary-model">
-        <img src="${this.getAssetUri('media/icons/brain.svg')}" alt="" aria-hidden="true" />
+        <img src="${this.getAssetUri('media/icons/brain.png')}" alt="" aria-hidden="true" />
         <select id="summaryModelSelect" aria-label="Select AI model">
           ${modelOptionsMarkup}
         </select>
