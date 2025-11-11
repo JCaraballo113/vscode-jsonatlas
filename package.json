@@ -141,9 +141,14 @@
                     "group": "navigation@101"
                 },
                 {
+                    "command": "jsonAtlas.generateSchemaUpdates",
+                    "when": "(resourceLangId == json || resourceLangId == jsonc) && config.jsonAtlas.enableSchemaValidation",
+                    "group": "navigation@102"
+                },
+                {
                     "command": "jsonAtlas.goToSchemaDefinition",
                     "when": "resourceLangId == json || resourceLangId == jsonc",
-                    "group": "navigation@102"
+                    "group": "navigation@103"
                 }
             ]
         },
