@@ -1,0 +1,43 @@
+{
+    "id": "proj-402",
+    "name": "Telemetry Bridge",
+    "status": "active",
+    "owner": {
+        "name": "Mei Lin",
+        "email": "mei.lin@example.com",
+        "teams": ["data-platform", "observability"]
+    },
+    "environments": [
+        {
+            "name": "dev",
+            "url": "https://api.dev.telemetry.example.com",
+            "shards": 20,
+            "features": {
+                "sampling": true,
+                "rateLimitPerSecond": 250
+            }
+        },
+        {
+            "name": "prod",
+            "url": "https://api.telemetry.example.com",
+            "shards": 6,
+            "features": {
+                "sampling": false,
+                "rateLimitPerSecond": 1200
+            }
+        }
+    ],
+    "alerts": [
+        {
+            "type": "latency",
+            "thresholdMs": 350,
+            "channels": ["pager", "slack"]
+        },
+        {
+            "type": "errorRate",
+            "thresholdPercent": 1.5,
+            "channels": ["email"]
+        }
+    ],
+    "lastDeployment": "2024-11-07T15:23:10Z"
+}

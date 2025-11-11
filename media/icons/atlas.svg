@@ -1,0 +1,44 @@
+<svg viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background -->
+  <rect width="128" height="128" fill="none" rx="12"/>
+  
+  <!-- Connection lines -->
+  <g stroke="#6B9FD8" stroke-width="2.5" fill="none" opacity="0.7">
+    <!-- From center to level 1 -->
+    <path d="M 64 64 L 35 35" stroke-linecap="round"/>
+    <path d="M 64 64 L 93 35" stroke-linecap="round"/>
+    <path d="M 64 64 L 25 70" stroke-linecap="round"/>
+    <path d="M 64 64 L 103 70" stroke-linecap="round"/>
+    <path d="M 64 64 L 40 95" stroke-linecap="round"/>
+    <path d="M 64 64 L 88 95" stroke-linecap="round"/>
+  </g>
+  
+  <!-- Level 1 nodes (outer) -->
+  <g>
+    <circle cx="35" cy="35" r="10" fill="#4A9EFF" stroke="#6BB6FF" stroke-width="2"/>
+    <circle cx="93" cy="35" r="10" fill="#4A9EFF" stroke="#6BB6FF" stroke-width="2"/>
+    <circle cx="25" cy="70" r="10" fill="#4A9EFF" stroke="#6BB6FF" stroke-width="2"/>
+    <circle cx="103" cy="70" r="10" fill="#4A9EFF" stroke="#6BB6FF" stroke-width="2"/>
+    <circle cx="40" cy="95" r="10" fill="#4A9EFF" stroke="#6BB6FF" stroke-width="2"/>
+    <circle cx="88" cy="95" r="10" fill="#4A9EFF" stroke="#6BB6FF" stroke-width="2"/>
+  </g>
+  
+  <!-- Central node -->
+  <g>
+    <circle cx="64" cy="64" r="16" fill="#8B5CF6" stroke="#A78BFA" stroke-width="2.5"/>
+    <!-- JSON braces in center -->
+    <text x="64" y="70" font-family="monospace" font-size="16" fill="white" text-anchor="middle" font-weight="bold">{}</text>
+  </g>
+  
+  <!-- Small dots on outer nodes to suggest more data -->
+  <g fill="white" opacity="0.8">
+    <circle cx="35" cy="35" r="2"/>
+    <circle cx="93" cy="35" r="2"/>
+    <circle cx="25" cy="70" r="2"/>
+    <circle cx="103" cy="70" r="2"/>
+    <circle cx="40" cy="95" r="2"/>
+    <circle cx="88" cy="95" r="2"/>
+  </g>
+  
+  
+</svg>

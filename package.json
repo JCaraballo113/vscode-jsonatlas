@@ -1,0 +1,216 @@
+{
+    "name": "json-atlas",
+    "displayName": "JSON Atlas",
+    "description": "JSON Atlas keeps JSON files healthy with inline diagnostics, an interactive visualizer, and AI-powered summaries/chat.",
+    "version": "0.0.1",
+    "publisher": "jsonlabs",
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "https://example.com/json-atlas.git"
+    },
+    "type": "commonjs",
+    "main": "./dist/extension.js",
+    "icon": "media/icon.png",
+    "scripts": {
+        "build:webview": "vite build",
+        "compile": "npm run build:webview && tsc -p ./",
+        "watch": "tsc -watch -p ./",
+        "lint": "tsc --noEmit -p ./",
+        "package": "vsce package"
+    },
+    "keywords": [
+        "json",
+        "lint",
+        "visualizer",
+        "atlas",
+        "visualization"
+    ],
+    "categories": [
+        "Linters",
+        "Other"
+    ],
+    "activationEvents": [
+        "onLanguage:json",
+        "onLanguage:jsonc",
+        "onCommand:jsonAtlas.showVisualizer",
+        "onCommand:jsonAtlas.openVisualizerPanel",
+        "onCommand:jsonAtlas.explainSelection",
+        "onCommand:jsonAtlas.generateEditProposals"
+    ],
+    "contributes": {
+        "commands": [
+            {
+                "command": "jsonAtlas.showVisualizer",
+                "title": "JSON Atlas: Show Visualizer",
+                "category": "JSON Atlas",
+                "icon": {
+                    "light": "media/icons/atlas.svg",
+                    "dark": "media/icons/atlas.svg"
+                }
+            },
+            {
+                "command": "jsonAtlas.openVisualizerPanel",
+                "title": "JSON Atlas: Open Visualizer Panel",
+                "category": "JSON Atlas"
+            },
+            {
+                "command": "jsonAtlas.setAiApiKey",
+                "title": "JSON Atlas: Set AI API Key",
+                "category": "JSON Atlas"
+            },
+            {
+                "command": "jsonAtlas.clearAiApiKey",
+                "title": "JSON Atlas: Clear AI API Key",
+                "category": "JSON Atlas"
+            },
+            {
+                "command": "jsonAtlas.summarizeJson",
+                "title": "JSON Atlas: Summarize JSON",
+                "category": "JSON Atlas"
+            },
+            {
+                "command": "jsonAtlas.generateEditProposals",
+                "title": "JSON Atlas: Generate AI Edit Proposals",
+                "category": "JSON Atlas"
+            },
+            {
+                "command": "jsonAtlas.explainSelection",
+                "title": "JSON Atlas: Explain Selection",
+                "category": "JSON Atlas"
+            }
+        ],
+        "viewsContainers": {
+            "panel": [
+                {
+                    "id": "jsonAtlas-summary",
+                    "title": "JSON Summary",
+                    "icon": "media/icon.png",
+                    "priority": 1000
+                }
+            ]
+        },
+        "views": {
+            "jsonAtlas-summary": [
+                {
+                    "id": "jsonAtlas.summaryView",
+                    "name": "Summary",
+                    "type": "webview"
+                }
+            ]
+        },
+        "menus": {
+            "editor/title": [
+                {
+                    "command": "jsonAtlas.showVisualizer",
+                    "when": "resourceLangId == json || resourceLangId == jsonc",
+                    "group": "navigation@99"
+                }
+            ],
+            "editor/context": [
+                {
+                    "command": "jsonAtlas.showVisualizer",
+                    "when": "resourceLangId == json || resourceLangId == jsonc",
+                    "group": "navigation@99"
+                },
+                {
+                    "command": "jsonAtlas.explainSelection",
+                    "when": "resourceLangId == json || resourceLangId == jsonc",
+                    "group": "navigation@100"
+                },
+                {
+                    "command": "jsonAtlas.generateEditProposals",
+                    "when": "resourceLangId == json || resourceLangId == jsonc",
+                    "group": "navigation@101"
+                }
+            ]
+        },
+        "configuration": {
+            "title": "JSON Atlas",
+            "properties": {
+                "jsonAtlas.enableSchemaValidation": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Validate JSON documents against a schema defined by jsonAtlas.schemaPath."
+                },
+                "jsonAtlas.schemaPath": {
+                    "type": "string",
+                    "default": "",
+                    "markdownDescription": "Absolute or workspace-relative path to a JSON Schema file used for validation. Example: `schemas/payload.schema.json`."
+                },
+                "jsonAtlas.autoSaveOnEdit": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Automatically save the JSON document after applying changes made through the visualizer (e.g., renames)."
+                },
+                "jsonAtlas.defaultVisualizerView": {
+                    "type": "string",
+                    "enum": [
+                        "graph",
+                        "tree"
+                    ],
+                    "enumDescriptions": [
+                        "Graph view (node-based layout)",
+                        "Tree view (hierarchical list)"
+                    ],
+                    "default": "graph",
+                    "description": "Choose which view the JSON Visualizer opens in by default."
+                },
+                "jsonAtlas.graphAutoScale": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Automatically set the initial graph zoom based on document size. Disable to use jsonAtlas.graphInitialScale."
+                },
+                "jsonAtlas.graphInitialScale": {
+                    "type": "number",
+                    "minimum": 0.4,
+                    "maximum": 1.2,
+                    "default": 1,
+                    "description": "Initial zoom for the graph view when automatic scaling is disabled."
+                },
+                "jsonAtlas.graphMaxExpandedDepth": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 5,
+                    "markdownDescription": "Maximum depth (root = 0) the visualizer auto-expands before collapsing nested nodes. Set to `0` to expand the entire document.",
+                    "description": "Maximum depth (root = 0) the visualizer auto-expands before collapsing nested nodes."
+                },
+                "jsonAtlas.autoGenerateSummary": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Automatically generate an AI summary whenever a JSON or JSONC file becomes active."
+                },
+                "jsonAtlas.enableSummaryCaching": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Cache AI summaries per document and model so repeated requests reuse the last result until the content changes."
+                },
+                "jsonAtlas.autoOpenVisualizer": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Automatically open the JSON Visualizer when a JSON or JSONC file becomes active."
+                }
+            }
+        }
+    },
+    "engines": {
+        "vscode": "^1.87.0"
+    },
+    "dependencies": {
+        "@ai-sdk/openai": "^2.0.64",
+        "@ai-sdk/anthropic": "^2.0.44",
+        "ai": "^5.0.89",
+        "ajv": "^8.17.1",
+        "jsonc-parser": "^3.3.1",
+        "markdown-it": "^14.1.0"
+    },
+    "devDependencies": {
+        "@types/markdown-it": "^14.1.2",
+        "@types/node": "^24.10.0",
+        "@types/vscode": "^1.87.0",
+        "patch-package": "^8.0.1",
+        "typescript": "^5.9.3",
+        "vite": "^7.2.2",
+        "vsce": "^2.15.0"
+    }
+}

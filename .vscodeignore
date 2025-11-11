@@ -1,0 +1,8 @@
+**/.git
+**/.DS_Store
+src/**
+tsconfig.json
+.vscodeignore
+.gitignore
+README.md
+node_modules/@types/**

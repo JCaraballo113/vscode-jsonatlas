@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Visualizer Test</title>
+  <link rel="stylesheet" href="media/visualizer.css" />
+  <style>
+    body { background: #1e1e1e; }
+  </style>
+</head>
+<body>
+  <section id="status" role="status" hidden></section>
+  <main id="visualizer" role="tree" aria-live="polite">
+    <div class="view-switcher" role="toolbar" aria-label="Visualizer view mode">
+      <label for="visualizerViewSelect">View</label>
+      <select id="visualizerViewSelect">
+        <option value="graph">Graph</option>
+        <option value="tree">Tree</option>
+      </select>
+    </div>
+  </main>
+  <script>
+    window.acquireVsCodeApi = () => ({ postMessage: (msg) => console.log('postMessage', msg) });
+  </script>
+  <script src="media/visualizer.js"></script>
+  <script>
+    window.addEventListener('load', () => {
+      window.addEventListener('message', (event) => console.log('outer message', event.data));
+      const sample = { foo: { bar: 1, baz: [ { name: 'alpha' }, { name: 'beta' } ] }, url: 'https://example.com' };
+      window.postMessage({ type: 'render', payload: sample }, '*');
+    });
+  </script>
+</body>
+</html>
