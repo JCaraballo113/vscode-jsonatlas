@@ -1,4 +1,5 @@
 import { createHash } from 'crypto';
+import { minimatch } from 'minimatch';
 import * as vscode from 'vscode';
 import { findNodeAtOffset, getLocation, getNodeValue, Node, parseTree, ParseError, ParseOptions, printParseErrorCode } from 'jsonc-parser';
 import {
@@ -7,7 +8,7 @@ import {
   VisualizerSchemaPointerEntry,
   VisualizerSelectionInfo
 } from './visualizerPanel';
-import { SchemaValidator } from './schemaValidator';
+import { SchemaNavigationTarget, SchemaValidator } from './schemaValidator';
 import { AiService, EditProposal } from './aiService';
 import { SummaryViewProvider } from './summaryView';
 
@@ -124,12 +125,20 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('jsonAtlas.summarizeJson', () => handleSummarizeCommand()),
     vscode.commands.registerCommand('jsonAtlas.explainSelection', () => handleExplainSelectionCommand()),
     vscode.commands.registerCommand('jsonAtlas.openVisualizerPanel', () => handleOpenVisualizerPanelCommand(context)),
-    vscode.commands.registerCommand('jsonAtlas.generateEditProposals', () => handleGenerateEditProposals())
+    vscode.commands.registerCommand('jsonAtlas.generateEditProposals', () => handleGenerateEditProposals()),
+    vscode.commands.registerCommand('jsonAtlas.goToSchemaDefinition', (args?: GoToSchemaDefinitionCommandArgs) =>
+      handleGoToSchemaDefinitionCommand(args)
+    )
   );
 
   context.subscriptions.push(
     summaryViewProvider,
-    vscode.window.registerWebviewViewProvider(SummaryViewProvider.viewId, summaryViewProvider)
+    vscode.window.registerWebviewViewProvider(SummaryViewProvider.viewId, summaryViewProvider),
+    vscode.languages.registerHoverProvider(Array.from(SUPPORTED_LANGUAGES), {
+      provideHover(document, position) {
+        return provideSchemaHover(document, position);
+      }
+    })
   );
 }
 
@@ -387,7 +396,7 @@ async function maybeAutoGenerateSummary(document: vscode.TextDocument) {
 }
 
 async function maybeAutoOpenVisualizer(document: vscode.TextDocument, context: vscode.ExtensionContext) {
-  if (!shouldAutoOpenVisualizer() || !isLintableDocument(document)) {
+  if (!shouldAutoOpenVisualizer() || !isLintableDocument(document) || isVisualizerExcluded(document)) {
     return;
   }
   if (!isDocumentActive(document)) {
@@ -513,6 +522,21 @@ function shouldAutoGenerateSummary() {
 
 function shouldAutoOpenVisualizer() {
   return vscode.workspace.getConfiguration('jsonAtlas').get<boolean>('autoOpenVisualizer', false);
+}
+
+function isVisualizerExcluded(document: vscode.TextDocument): boolean {
+  const config = vscode.workspace.getConfiguration('jsonAtlas', document.uri);
+  const patterns = config.get<string[]>('visualizerExcludeGlobs', ['**/*.schema.json', '**/schemas/**']);
+  if (!Array.isArray(patterns) || !patterns.length) {
+    return false;
+  }
+
+  const filePath = document.uri.fsPath;
+  const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
+  const base = workspaceFolder?.uri.fsPath ?? '';
+  const relativePath = base && filePath.startsWith(base) ? filePath.slice(base.length + (base.endsWith('/') ? 0 : 1)) : filePath;
+
+  return patterns.some((pattern) => minimatch(relativePath, pattern, { nocase: true, dot: true, matchBase: true }));
 }
 
 function isSummaryCachingEnabled(document: vscode.TextDocument): boolean {
@@ -733,6 +757,133 @@ function getDocumentName(document: vscode.TextDocument): string {
   return document.uri.fsPath.split(/[\\/]/).pop() ?? document.uri.path;
 }
 
+async function provideSchemaHover(document: vscode.TextDocument, position: vscode.Position): Promise<vscode.Hover | undefined> {
+  if (!isLintableDocument(document) || !isSchemaValidationEnabled(document)) {
+    return undefined;
+  }
+
+  const path = getJsonPathSegments(document, document.offsetAt(position));
+  if (!path) {
+    return undefined;
+  }
+
+  const ready = await ensureSchemaNavigationData(document);
+  if (!ready) {
+    return undefined;
+  }
+
+  const target = schemaValidator.resolveNavigationTarget(document.uri, path);
+  if (!target) {
+    return undefined;
+  }
+
+  const markdown = new vscode.MarkdownString(undefined, true);
+  markdown.isTrusted = true;
+
+  const title = target.title?.trim() || 'Schema definition';
+  markdown.appendMarkdown(`**${escapeMarkdown(title)}**\n\n`);
+
+  const description = target.description?.trim();
+  if (description) {
+    markdown.appendMarkdown(`${escapeMarkdown(description)}\n\n`);
+  }
+
+  const jsonPath = formatJsonPath(path);
+  markdown.appendMarkdown(`JSON Path: \`${escapeMarkdown(jsonPath)}\`\n\n`);
+  if (target.pointer) {
+    markdown.appendMarkdown(`Pointer: \`${escapeMarkdown(target.pointer)}\`\n\n`);
+  }
+
+  const commandArgs: GoToSchemaDefinitionCommandArgs = {
+    documentUri: document.uri.toString(),
+    path
+  };
+  const commandUri = vscode.Uri.parse(
+    `command:jsonAtlas.goToSchemaDefinition?${encodeURIComponent(JSON.stringify(commandArgs))}`
+  );
+  markdown.appendMarkdown(`[Go to schema definition](${commandUri.toString()})`);
+
+  return new vscode.Hover(markdown);
+}
+
+async function handleGoToSchemaDefinitionCommand(args?: GoToSchemaDefinitionCommandArgs): Promise<void> {
+  const argUri = typeof args?.documentUri === 'string' ? vscode.Uri.parse(args.documentUri) : undefined;
+  const activeEditor = vscode.window.activeTextEditor;
+  const targetUri = argUri ?? activeEditor?.document.uri;
+  if (!targetUri) {
+    void vscode.window.showInformationMessage('Open a JSON document to locate its schema definition.');
+    return;
+  }
+
+  const document =
+    vscode.workspace.textDocuments.find((doc) => doc.uri.toString() === targetUri.toString()) ??
+    (await vscode.workspace.openTextDocument(targetUri));
+
+  let path = normalizeJsonPath(args?.path);
+  if (!path && activeEditor && activeEditor.document.uri.toString() === targetUri.toString()) {
+    path = getJsonPathSegments(document, document.offsetAt(activeEditor.selection.active));
+  }
+  if (!path) {
+    void vscode.window.showInformationMessage('Place the cursor inside a JSON value to locate its schema definition.');
+    return;
+  }
+
+  const ready = await ensureSchemaNavigationData(document);
+  if (!ready) {
+    void vscode.window.showInformationMessage('Schema definition not available (validation disabled or schema missing).');
+    return;
+  }
+
+  const target = schemaValidator.resolveNavigationTarget(document.uri, path);
+  if (!target) {
+    void vscode.window.showInformationMessage('Schema definition not found for this location.');
+    return;
+  }
+
+  try {
+    await revealSchemaNavigationTarget(target);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    void vscode.window.showErrorMessage(`Unable to open schema definition: ${message}`);
+  }
+}
+
+function normalizeJsonPath(value: unknown): JsonPath | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const result: JsonPath = [];
+  for (const segment of value) {
+    if (typeof segment === 'number' || typeof segment === 'string') {
+      result.push(segment);
+      continue;
+    }
+    return undefined;
+  }
+  return result;
+}
+
+function isSchemaValidationEnabled(document: vscode.TextDocument): boolean {
+  return vscode.workspace.getConfiguration('jsonAtlas', document.uri).get<boolean>('enableSchemaValidation', false);
+}
+
+async function revealSchemaNavigationTarget(target: SchemaNavigationTarget): Promise<void> {
+  const document = await vscode.workspace.openTextDocument(target.uri);
+  const editor = await vscode.window.showTextDocument(document, { preview: true });
+  const offset = typeof target.offset === 'number' ? target.offset : 0;
+  const length = typeof target.length === 'number' ? target.length : 0;
+  const start = document.positionAt(offset);
+  const end = length > 0 ? document.positionAt(offset + length) : start;
+  const range = new vscode.Range(start, end);
+  editor.selection = new vscode.Selection(range.start, range.end);
+  editor.revealRange(range, vscode.TextEditorRevealType.InCenter);
+}
+
+function escapeMarkdown(value: string): string {
+  return value.replace(/([\\`*_{}\[\]()#+\-!])/g, '\\$1');
+}
+
 function getConfiguredLayoutPreset(document: vscode.TextDocument): GraphLayoutPreset {
   const config = vscode.workspace.getConfiguration('jsonAtlas', document.uri);
   const value = config.get<string>('graphLayoutPreset', 'balanced');
@@ -740,6 +891,35 @@ function getConfiguredLayoutPreset(document: vscode.TextDocument): GraphLayoutPr
     return value;
   }
   return 'balanced';
+}
+
+async function ensureSchemaNavigationData(document: vscode.TextDocument): Promise<boolean> {
+  if (!isLintableDocument(document) || !isSchemaValidationEnabled(document)) {
+    return false;
+  }
+
+  const analysis = getOrComputeAnalysis(document);
+  if (!analysis?.root) {
+    return false;
+  }
+
+  if (!schemaValidator.getSchemaInfo(document.uri)) {
+    await schemaValidator.validate(document, analysis.root, analysis.data);
+  }
+
+  if (!schemaValidator.getSchemaInfo(document.uri)) {
+    return false;
+  }
+
+  const key = document.uri.toString();
+  if (!schemaPointerCache.has(key)) {
+    const map = buildSchemaPointerMap(document, analysis.root);
+    if (map) {
+      schemaPointerCache.set(key, map);
+    }
+  }
+
+  return schemaPointerCache.has(key);
 }
 
 function log(message: string) {
@@ -819,6 +999,11 @@ interface ExplainSelectionTarget {
   text: string;
   path?: string;
   label?: string;
+}
+
+interface GoToSchemaDefinitionCommandArgs {
+  documentUri?: string;
+  path?: JsonPath;
 }
 
 function normalizeSelections(

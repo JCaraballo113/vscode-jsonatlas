@@ -78,6 +78,11 @@
                 "command": "jsonAtlas.explainSelection",
                 "title": "JSON Atlas: Explain Selection",
                 "category": "JSON Atlas"
+            },
+            {
+                "command": "jsonAtlas.goToSchemaDefinition",
+                "title": "JSON Atlas: Go to Schema Definition",
+                "category": "JSON Atlas"
             }
         ],
         "viewsContainers": {
@@ -122,6 +127,11 @@
                     "command": "jsonAtlas.generateEditProposals",
                     "when": "resourceLangId == json || resourceLangId == jsonc",
                     "group": "navigation@101"
+                },
+                {
+                    "command": "jsonAtlas.goToSchemaDefinition",
+                    "when": "resourceLangId == json || resourceLangId == jsonc",
+                    "group": "navigation@102"
                 }
             ]
         },
@@ -186,6 +196,18 @@
                     "markdownDescription": "Default spacing preset for the visualizer graph view. `compact` squeezes nodes closer, `relaxed` spreads them out with longer connectors.",
                     "description": "Default spacing preset for the visualizer graph view."
                 },
+                "jsonAtlas.visualizerExcludeGlobs": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "default": [
+                        "**/*.schema.json",
+                        "**/schemas/**"
+                    ],
+                    "markdownDescription": "Glob patterns (relative to the workspace) that prevent the Visualizer from auto-opening for matching JSON files. Manual commands still work.",
+                    "description": "Files matching these globs won't auto-trigger the visualizer."
+                },
                 "jsonAtlas.autoGenerateSummary": {
                     "type": "boolean",
                     "default": false,
@@ -208,12 +230,13 @@
         "vscode": "^1.87.0"
     },
     "dependencies": {
-        "@ai-sdk/openai": "^2.0.64",
         "@ai-sdk/anthropic": "^2.0.44",
+        "@ai-sdk/openai": "^2.0.64",
         "ai": "^5.0.89",
         "ajv": "^8.17.1",
         "jsonc-parser": "^3.3.1",
-        "markdown-it": "^14.1.0"
+        "markdown-it": "^14.1.0",
+        "minimatch": "^9.0.5"
     },
     "devDependencies": {
         "@types/markdown-it": "^14.1.2",
