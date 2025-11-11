@@ -1,4 +1,5 @@
 import { createHash } from 'crypto';
+import * as nodePath from 'path';
 import { minimatch } from 'minimatch';
 import * as vscode from 'vscode';
 import { findNodeAtLocation, findNodeAtOffset, getLocation, getNodeValue, Node, parseTree, ParseError, ParseOptions, printParseErrorCode } from 'jsonc-parser';
@@ -7,6 +8,7 @@ import { SchemaInsight, SchemaNavigationTarget, SchemaValidator } from './schema
 import { SchemaInsightsViewProvider, VisualizerSchemaInsight } from './schemaInsightsView';
 import { AiService, EditProposal, SchemaUpdateProposal } from './aiService';
 import { SummaryViewProvider } from './summaryView';
+import { SchemaAssociationStore } from './schemaAssociations';
 
 const SUPPORTED_LANGUAGES = new Set(['json', 'jsonc']);
 const parseOptions: ParseOptions = { allowTrailingComma: true, disallowComments: false };
@@ -25,6 +27,7 @@ let aiService: AiService;
 let summaryViewProvider: SummaryViewProvider;
 let schemaInsightsProvider: SchemaInsightsViewProvider;
 let outputChannel: vscode.OutputChannel;
+let schemaAssociationStore: SchemaAssociationStore;
 interface AnalysisSnapshot {
   root: Node | undefined;
   data: unknown;
@@ -35,6 +38,11 @@ interface SummaryCacheEntry {
   summary: string;
 }
 
+interface SchemaQuickPickItem extends vscode.QuickPickItem {
+  uri?: vscode.Uri;
+  action?: 'browse' | 'input' | 'clear';
+}
+
 export function activate(context: vscode.ExtensionContext) {
   diagnostics = vscode.languages.createDiagnosticCollection('jsonAtlas');
   context.subscriptions.push(diagnostics);
@@ -43,6 +51,8 @@ export function activate(context: vscode.ExtensionContext) {
   aiService = new AiService(context);
   summaryViewProvider = new SummaryViewProvider(context.extensionUri, aiService);
   schemaInsightsProvider = new SchemaInsightsViewProvider(context.extensionUri);
+  schemaAssociationStore = new SchemaAssociationStore();
+  schemaValidator.setAssociationStore(schemaAssociationStore);
 
   if (vscode.window.activeTextEditor) {
     const document = vscode.window.activeTextEditor.document;
@@ -135,6 +145,7 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('jsonAtlas.openVisualizerPanel', () => handleOpenVisualizerPanelCommand(context)),
     vscode.commands.registerCommand('jsonAtlas.generateEditProposals', () => handleGenerateEditProposals()),
     vscode.commands.registerCommand('jsonAtlas.generateSchemaUpdates', () => handleGenerateSchemaUpdates()),
+    vscode.commands.registerCommand('jsonAtlas.associateSchema', () => handleAssociateSchemaCommand()),
     vscode.commands.registerCommand('jsonAtlas.goToSchemaDefinition', (args?: GoToSchemaDefinitionCommandArgs) =>
       handleGoToSchemaDefinitionCommand(args)
     )
@@ -445,6 +456,76 @@ async function handleGenerateSchemaUpdates() {
   await handleSchemaProposalSelection(document, schemaDocument, pick.proposal);
 }
 
+async function handleAssociateSchemaCommand() {
+  const document = getSummarizableDocument();
+  if (!document || !isLintableDocument(document)) {
+    vscode.window.showErrorMessage('Open a JSON or JSONC document to associate a schema.');
+    return;
+  }
+  if (!schemaAssociationStore) {
+    return;
+  }
+
+  const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
+  if (!workspaceFolder) {
+    void vscode.window.showWarningMessage('Schema associations require the document to be inside an open workspace folder.');
+    return;
+  }
+
+  const currentAssignment = await schemaAssociationStore.getSchemaReference(document.uri);
+  const items = await buildSchemaQuickPickItems(document, currentAssignment);
+  const pick = await vscode.window.showQuickPick(items, {
+    placeHolder: 'Select a schema to associate with this document',
+    matchOnDetail: true
+  });
+
+  if (!pick) {
+    return;
+  }
+
+  if (pick.action === 'clear') {
+    await schemaAssociationStore.clearSchemaReference(document.uri);
+    void vscode.window.showInformationMessage('Cleared schema association for this document.');
+    await refreshDiagnostics(document);
+    return;
+  }
+
+  let schemaUri: vscode.Uri | undefined = pick.uri;
+
+  if (pick.action === 'browse') {
+    const selection = await vscode.window.showOpenDialog({
+      title: 'Select JSON Schema',
+      canSelectFiles: true,
+      canSelectFolders: false,
+      filters: { JSON: ['json', 'schema.json'] }
+    });
+    schemaUri = selection?.[0];
+  }
+
+  if (pick.action === 'input') {
+    const input = await vscode.window.showInputBox({
+      title: 'Enter schema path or URL',
+      placeHolder: 'schemas/payload.schema.json or https://example.com/schema.json'
+    });
+    if (input) {
+      schemaUri = resolveSchemaReferenceInput(document, input);
+      if (!schemaUri) {
+        void vscode.window.showWarningMessage('Unable to resolve that schema path or URL.');
+        return;
+      }
+    }
+  }
+
+  if (!schemaUri) {
+    return;
+  }
+
+  const reference = formatSchemaReference(document.uri, schemaUri);
+  await schemaAssociationStore.setSchemaReference(document.uri, reference);
+  void vscode.window.showInformationMessage(`Associated ${getDocumentName(document)} with ${schemaUri.toString()}.`);
+  await refreshDiagnostics(document);
+}
+
 async function handleOpenVisualizerPanelCommand(context: vscode.ExtensionContext) {
   const revealed = VisualizerPanel.revealExisting();
   if (revealed) {
@@ -711,6 +792,124 @@ async function applySchemaProposal(
   void vscode.window.showInformationMessage(`Applied schema proposal "${proposal.title}".`);
   log(`Applied schema proposal "${proposal.title}" to ${getDocumentName(schemaDocument)}.`);
   await refreshDiagnostics(sampleDocument);
+}
+
+async function buildSchemaQuickPickItems(document: vscode.TextDocument, currentAssignment?: string): Promise<SchemaQuickPickItem[]> {
+  const candidates = await gatherSchemaCandidates(document);
+  const items: SchemaQuickPickItem[] = [];
+  if (currentAssignment) {
+    items.push({ label: '$(trash) Clear saved association', action: 'clear' });
+  }
+  items.push(...candidates);
+  items.push({ label: '$(folder-opened) Browse for schema file…', action: 'browse' });
+  items.push({ label: '$(link-external) Enter schema URL or path…', action: 'input' });
+  return items;
+}
+
+async function gatherSchemaCandidates(document: vscode.TextDocument): Promise<SchemaQuickPickItem[]> {
+  const seen = new Set<string>();
+  const items: SchemaQuickPickItem[] = [];
+
+  const configEntries = await getConfiguredSchemaCandidates(document);
+  for (const entry of configEntries) {
+    if (!entry.uri) {
+      continue;
+    }
+    const key = entry.uri.toString();
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    items.push(entry);
+  }
+
+  const workspaceEntries = await findWorkspaceSchemas(document, seen);
+  items.push(...workspaceEntries);
+
+  return items;
+}
+
+async function getConfiguredSchemaCandidates(document: vscode.TextDocument): Promise<SchemaQuickPickItem[]> {
+  const config = vscode.workspace.getConfiguration('jsonAtlas', document.uri);
+  const mappings = config.get<Array<{ pattern?: string; schema?: string }>>('schemas', []);
+  const results: SchemaQuickPickItem[] = [];
+  if (Array.isArray(mappings)) {
+    for (const mapping of mappings) {
+      if (!mapping?.schema) {
+        continue;
+      }
+      const uri = resolveSchemaReferenceInput(document, mapping.schema);
+      if (!uri) {
+        continue;
+      }
+      const label = mapping.schema;
+      results.push({
+        label,
+        description: uri.scheme === 'file' ? vscode.workspace.asRelativePath(uri, false) : uri.toString(),
+        uri
+      });
+    }
+  }
+  return results;
+}
+
+async function findWorkspaceSchemas(document: vscode.TextDocument, seen: Set<string>): Promise<SchemaQuickPickItem[]> {
+  const results: SchemaQuickPickItem[] = [];
+  const files = await vscode.workspace.findFiles('**/*.schema.json', '**/node_modules/**', 50);
+  for (const uri of files) {
+    const key = uri.toString();
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    results.push({
+      label: vscode.workspace.asRelativePath(uri, false),
+      description: uri.fsPath,
+      uri
+    });
+  }
+  return results;
+}
+
+function resolveSchemaReferenceInput(document: vscode.TextDocument, input: string): vscode.Uri | undefined {
+  const trimmed = input?.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(trimmed)) {
+    try {
+      return vscode.Uri.parse(trimmed);
+    } catch {
+      return undefined;
+    }
+  }
+  if (nodePath.isAbsolute(trimmed)) {
+    return vscode.Uri.file(trimmed);
+  }
+  const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
+  if (workspaceFolder) {
+    const segments = trimmed.replace(/^\.\/+/, '').split(/[\\/]+/).filter(Boolean);
+    return vscode.Uri.joinPath(workspaceFolder.uri, ...segments);
+  }
+  if (document.uri.scheme === 'file') {
+    const dir = nodePath.dirname(document.uri.fsPath);
+    return vscode.Uri.file(nodePath.join(dir, trimmed));
+  }
+  return undefined;
+}
+
+function formatSchemaReference(documentUri: vscode.Uri, schemaUri: vscode.Uri): string {
+  if (schemaUri.scheme === 'file') {
+    const workspaceFolder = vscode.workspace.getWorkspaceFolder(documentUri);
+    if (workspaceFolder) {
+      const relative = nodePath.relative(workspaceFolder.uri.fsPath, schemaUri.fsPath);
+      if (relative && !relative.startsWith('..')) {
+        return relative.split(nodePath.sep).join('/');
+      }
+    }
+    return schemaUri.fsPath;
+  }
+  return schemaUri.toString();
 }
 
 function shouldAutoGenerateSummary() {

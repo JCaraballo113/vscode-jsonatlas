@@ -3,6 +3,10 @@ import { TextDecoder } from 'util';
 import * as vscode from 'vscode';
 import Ajv, { ErrorObject, ValidateFunction } from 'ajv';
 import { findNodeAtLocation, Node, parseTree } from 'jsonc-parser';
+import { minimatch } from 'minimatch';
+import { SchemaAssociationStore } from './schemaAssociations';
+import * as http from 'http';
+import * as https from 'https';
 const draft07 = require('ajv/dist/refs/json-schema-draft-07.json');
 const draft2020 = require('ajv/dist/refs/json-schema-2020-12/schema.json');
 const draft2020Applicator = require('ajv/dist/refs/json-schema-2020-12/meta/applicator.json');
@@ -48,6 +52,16 @@ export interface SchemaInsight {
   keyword: string;
 }
 
+type SchemaSource =
+  | { kind: 'uri'; uri: vscode.Uri; cacheKey: string }
+  | { kind: 'inline'; cacheKey: string; schema: unknown; text: string; virtualUri: vscode.Uri };
+
+interface JsonSchemaMapping {
+  fileMatch?: string[] | string;
+  url?: string;
+  schema?: unknown;
+}
+
 export class SchemaValidator {
   private readonly ajv = new Ajv({ allErrors: true, strict: false, allowUnionTypes: true });
   private readonly decoder = new TextDecoder('utf-8');
@@ -55,6 +69,7 @@ export class SchemaValidator {
   private readonly warnedMessages = new Set<string>();
   private readonly schemaInfoByDocument = new Map<string, SchemaInfo>();
   private readonly schemaInsightsByDocument = new Map<string, SchemaInsight[]>();
+  private associationStore: SchemaAssociationStore | undefined;
 
   constructor() {
     [
@@ -68,6 +83,10 @@ export class SchemaValidator {
       draft2020Validation,
       draft2020
     ].forEach((schema) => this.addMetaSchemaSafe(schema));
+  }
+
+  public setAssociationStore(store: SchemaAssociationStore) {
+    this.associationStore = store;
   }
 
   public reset() {
@@ -98,22 +117,17 @@ export class SchemaValidator {
       return [];
     }
 
-    const schemaPath = config.get<string>('schemaPath')?.trim();
-    if (!schemaPath) {
+    const schemaSource = await this.resolveSchemaSource(document, root);
+    if (!schemaSource) {
       return [];
     }
 
-    const schemaUri = this.resolveSchemaUri(document, schemaPath);
-    if (!schemaUri) {
-      this.warnOnce(`Unable to resolve schema path: ${schemaPath}`);
-      return [];
-    }
-
-    const schemaContainer = await this.loadSchema(schemaUri);
+    const schemaContainer = await this.loadSchema(schemaSource);
     if (!schemaContainer) {
       return [];
     }
 
+    const schemaUri = schemaSource.kind === 'uri' ? schemaSource.uri : schemaSource.virtualUri;
     const schemaRoot = parseTree(schemaContainer.text);
     this.schemaInfoByDocument.set(document.uri.toString(), {
       uri: schemaUri,
@@ -123,7 +137,7 @@ export class SchemaValidator {
       pointerIndex: this.buildPointerIndex(schemaRoot)
     });
 
-    const validator = this.getValidator(schemaUri.toString(), schemaContainer);
+    const validator = this.getValidator(schemaSource.cacheKey, schemaContainer);
     if (!validator) {
       return [];
     }
@@ -138,32 +152,6 @@ export class SchemaValidator {
     }
 
     return errors.map((error) => this.createDiagnostic(error, document, root));
-  }
-
-  private resolveSchemaUri(document: vscode.TextDocument, schemaPath: string): vscode.Uri | undefined {
-    if (path.isAbsolute(schemaPath)) {
-      return vscode.Uri.file(schemaPath);
-    }
-
-    const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
-    if (!workspaceFolder) {
-      return undefined;
-    }
-
-    const segments = schemaPath.split(/[\\/]+/).filter(Boolean);
-    return vscode.Uri.joinPath(workspaceFolder.uri, ...segments);
-  }
-
-  private async loadSchema(uri: vscode.Uri): Promise<{ schema: unknown; fingerprint: string; text: string } | undefined> {
-    try {
-      const buffer = await vscode.workspace.fs.readFile(uri);
-      const text = this.decoder.decode(buffer);
-      const schema = JSON.parse(text);
-      return { schema, fingerprint: text, text };
-    } catch (error) {
-      this.warnOnce(`Failed to load schema from ${uri.fsPath}: ${this.describeError(error)}`);
-      return undefined;
-    }
   }
 
   private getValidator(key: string, payload: { schema: unknown; fingerprint: string }): ValidateFunction | undefined {
@@ -181,6 +169,260 @@ export class SchemaValidator {
       this.warnOnce(`Invalid schema at ${key}: ${this.describeError(error)}`);
       return undefined;
     }
+  }
+
+  private getEmbeddedSchemaReference(root: Node | undefined): string | undefined {
+    if (!root || root.type !== 'object') {
+      return undefined;
+    }
+    for (const property of root.children ?? []) {
+      if (!property || property.type !== 'property' || !property.children || property.children.length < 2) {
+        continue;
+      }
+      const keyNode = property.children[0];
+      const valueNode = property.children[1];
+      if (keyNode?.value === '$schema' && typeof valueNode?.value === 'string') {
+        return valueNode.value;
+      }
+    }
+    return undefined;
+  }
+
+  private resolveFromJsonSchemasConfig(document: vscode.TextDocument): SchemaSource | undefined {
+    const config = vscode.workspace.getConfiguration('json', document.uri);
+    const mappings = config.get<JsonSchemaMapping[]>('schemas', []);
+    if (!Array.isArray(mappings) || !mappings.length) {
+      return undefined;
+    }
+
+    for (const mapping of mappings) {
+      if (!mapping) {
+        continue;
+      }
+      const fileMatches = this.normalizeFileMatches(mapping.fileMatch);
+      if (fileMatches.length && !this.matchesAnyPattern(document, fileMatches)) {
+        continue;
+      }
+
+      if (typeof mapping.schema !== 'undefined') {
+        const text = JSON.stringify(mapping.schema, null, 2);
+        const baseId = mapping.url?.trim() || `json-schema:${fileMatches.join('|') || document.uri.toString()}`;
+        const cacheKey = `inline:${baseId}`;
+        const virtual = this.tryParseUri(baseId) ?? vscode.Uri.parse(baseId.startsWith('json-schema:') ? baseId : `json-schema:${encodeURIComponent(baseId)}`);
+        return {
+          kind: 'inline',
+          cacheKey,
+          schema: mapping.schema,
+          text,
+          virtualUri: virtual
+        };
+      }
+
+      if (typeof mapping.url === 'string' && mapping.url.trim()) {
+        const uri = this.resolveReferenceUri(document, mapping.url.trim());
+        if (uri) {
+          return { kind: 'uri', uri, cacheKey: uri.toString() };
+        }
+      }
+    }
+    return undefined;
+  }
+
+  private resolveFromAtlasConfig(document: vscode.TextDocument): SchemaSource | undefined {
+    const config = vscode.workspace.getConfiguration('jsonAtlas', document.uri);
+    const mappings = config.get<Array<{ pattern?: string; schema?: string }>>('schemas', []);
+    if (!Array.isArray(mappings) || !mappings.length) {
+      return undefined;
+    }
+
+    const relativePath = this.getDocumentRelativePath(document);
+    for (const mapping of mappings) {
+      if (!mapping || typeof mapping.pattern !== 'string' || typeof mapping.schema !== 'string') {
+        continue;
+      }
+      const matchesRelative = relativePath ? minimatch(relativePath, mapping.pattern, { dot: true }) : false;
+      const matchesAbsolute = document.uri.scheme === 'file' ? minimatch(document.uri.fsPath, mapping.pattern, { dot: true }) : false;
+      if (matchesRelative || matchesAbsolute) {
+        const uri = this.resolveReferenceUri(document, mapping.schema);
+        if (uri) {
+          return { kind: 'uri', uri, cacheKey: `atlas:${mapping.pattern}:${uri.toString()}` };
+        }
+      }
+    }
+    return undefined;
+  }
+
+  private normalizeFileMatches(value: string[] | string | undefined): string[] {
+    if (typeof value === 'string') {
+      return [value];
+    }
+    if (Array.isArray(value)) {
+      return value.filter((entry): entry is string => typeof entry === 'string');
+    }
+    return [];
+  }
+
+  private matchesAnyPattern(document: vscode.TextDocument, patterns: string[]): boolean {
+    if (!patterns.length) {
+      return true;
+    }
+    const relativePath = this.getDocumentRelativePath(document);
+    for (const pattern of patterns) {
+      if (pattern && relativePath && minimatch(relativePath, pattern, { dot: true })) {
+        return true;
+      }
+      const fsPath = document.uri.scheme === 'file' ? document.uri.fsPath : document.uri.toString();
+      if (pattern && minimatch(fsPath, pattern, { dot: true })) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private getDocumentRelativePath(document: vscode.TextDocument): string | undefined {
+    const relative = vscode.workspace.asRelativePath(document.uri, false);
+    if (relative && relative !== document.uri.toString()) {
+      return relative.split(path.sep).join('/');
+    }
+    if (document.uri.scheme === 'file') {
+      return document.uri.fsPath.split(path.sep).join('/');
+    }
+    return undefined;
+  }
+
+  private resolveReferenceUri(document: vscode.TextDocument, reference: string): vscode.Uri | undefined {
+    const trimmed = reference?.trim();
+    if (!trimmed) {
+      return undefined;
+    }
+
+    if (this.isAbsoluteUri(trimmed)) {
+      const parsed = this.tryParseUri(trimmed);
+      if (parsed) {
+        return parsed;
+      }
+    }
+
+    if (path.isAbsolute(trimmed)) {
+      return vscode.Uri.file(trimmed);
+    }
+
+    const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
+    if (workspaceFolder) {
+      const normalized = trimmed.replace(/^\.\/+/, '');
+      const segments = normalized.split(/[\\/]+/).filter(Boolean);
+      return vscode.Uri.joinPath(workspaceFolder.uri, ...segments);
+    }
+
+    if (document.uri.scheme === 'file') {
+      const dir = path.dirname(document.uri.fsPath);
+      return vscode.Uri.file(path.join(dir, trimmed));
+    }
+
+    return undefined;
+  }
+
+  private tryParseUri(value: string): vscode.Uri | undefined {
+    try {
+      return vscode.Uri.parse(value);
+    } catch {
+      return undefined;
+    }
+  }
+
+  private isAbsoluteUri(value: string): boolean {
+    return /^[a-zA-Z][a-zA-Z0-9+.+-]*:\/\//.test(value);
+  }
+
+  private async loadSchema(source: SchemaSource): Promise<{ schema: unknown; fingerprint: string; text: string } | undefined> {
+    if (source.kind === 'inline') {
+      return { schema: source.schema, fingerprint: source.text, text: source.text };
+    }
+
+    try {
+      const buffer = await this.readSchemaUri(source.uri);
+      const text = this.decoder.decode(buffer);
+      const schema = JSON.parse(text);
+      return { schema, fingerprint: text, text };
+    } catch (error) {
+      this.warnOnce(`Failed to load schema from ${source.uri.toString()}: ${this.describeError(error)}`);
+      return undefined;
+    }
+  }
+
+  private async readSchemaUri(uri: vscode.Uri): Promise<Uint8Array> {
+    if (uri.scheme === 'http' || uri.scheme === 'https') {
+      return this.fetchRemoteSchema(uri);
+    }
+    return vscode.workspace.fs.readFile(uri);
+  }
+
+  private async fetchRemoteSchema(uri: vscode.Uri, redirectCount = 0): Promise<Uint8Array> {
+    const client = uri.scheme === 'https' ? https : http;
+    return new Promise<Uint8Array>((resolve, reject) => {
+      const request = client.get(uri.toString(), (response) => {
+        const { statusCode, headers } = response;
+        if (statusCode && statusCode >= 300 && statusCode < 400 && headers.location && redirectCount < 3) {
+          response.resume();
+          let redirected = this.tryParseUri(headers.location);
+          if (!redirected) {
+            try {
+              const base = new URL(uri.toString());
+              const resolved = new URL(headers.location, base);
+              redirected = vscode.Uri.parse(resolved.toString());
+            } catch {
+              // ignore
+            }
+          }
+          if (redirected) {
+            this.fetchRemoteSchema(redirected, redirectCount + 1).then(resolve).catch(reject);
+            return;
+          }
+          reject(new Error(`Invalid redirect location: ${headers.location}`));
+          return;
+        }
+        if (statusCode && (statusCode < 200 || statusCode >= 300)) {
+          reject(new Error(`HTTP ${statusCode}`));
+          response.resume();
+          return;
+        }
+        const chunks: Buffer[] = [];
+        response.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+        response.on('end', () => resolve(Buffer.concat(chunks)));
+      });
+      request.on('error', reject);
+    });
+  }
+
+  private async resolveSchemaSource(document: vscode.TextDocument, root: Node | undefined): Promise<SchemaSource | undefined> {
+    const embedded = this.getEmbeddedSchemaReference(root);
+    if (embedded) {
+      const uri = this.resolveReferenceUri(document, embedded);
+      if (uri) {
+        return { kind: 'uri', uri, cacheKey: uri.toString() };
+      }
+    }
+
+    const assigned = await this.associationStore?.getSchemaReference(document.uri);
+    if (assigned) {
+      const uri = this.resolveReferenceUri(document, assigned);
+      if (uri) {
+        return { kind: 'uri', uri, cacheKey: `assignment:${document.uri.toString()}` };
+      }
+    }
+
+    const jsonConfigSource = this.resolveFromJsonSchemasConfig(document);
+    if (jsonConfigSource) {
+      return jsonConfigSource;
+    }
+
+    const atlasSource = this.resolveFromAtlasConfig(document);
+    if (atlasSource) {
+      return atlasSource;
+    }
+
+    this.warnOnce(`JSON Atlas could not find a schema for ${document.uri.fsPath}. Use "JSON Atlas: Associate Schema" to pick one.`);
+    return undefined;
   }
 
   private createDiagnostic(error: ErrorObject, document: vscode.TextDocument, root: Node | undefined): vscode.Diagnostic {

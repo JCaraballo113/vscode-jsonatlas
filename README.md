@@ -34,12 +34,12 @@ JSON Atlas keeps your JSON documents healthy by surfacing syntax errors in-line,
 Set the following settings (Workspace recommended):
 
 - `jsonAtlas.enableSchemaValidation`: `true`
-- `jsonAtlas.schemaPath`: absolute path or workspace-relative path (e.g. `schemas/payload.schema.json`)
+- *(optional)* `jsonAtlas.schemas`: array of `{ pattern, schema }` mappings if you want to hardwire globs to schema files.
 - `jsonAtlas.autoSaveOnEdit`: set to `true` if you want JSON Atlas to save the JSON document automatically whenever you rename a key from the visualizer.
 - `jsonAtlas.graphAutoScale`: enable to let JSON Atlas pick an initial graph zoom level based on how large the document is.
 - `jsonAtlas.graphInitialScale`: when auto scaling is disabled, this numeric zoom (0.4–1.2) becomes the starting scale for the graph view.
 - Run `JSON Atlas: Set AI API Key` (stored securely) to unlock AI chat and the `JSON Atlas: Summarize JSON` command.
-- For local testing, open `samples/sample.json` and set `jsonAtlas.schemaPath` to `samples/sample.schema.json` (workspace-relative) to try schema validation + navigation immediately.
+- For local testing, open `samples/sample.json` and run `JSON Atlas: Associate Schema` to bind it to `samples/sample.schema.json` (or add a `jsonAtlas.schemas` entry). The `$schema` property, VS Code `json.schemas`, and Atlas associations are all honored automatically.
 - `jsonAtlas.visualizerExcludeGlobs`: glob array that skips auto-opening the visualizer for matching files (defaults to `["**/*.schema.json", "**/schemas/**"]` so schema documents remain manual).
 - `jsonAtlas.insightExcludeGlobs`: glob array (defaults to `["**/.vscode/**", "**/*.schema.json"]`) that suppresses Schema Insight updates for matching files while still showing editor diagnostics.
 

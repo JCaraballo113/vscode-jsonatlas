@@ -37,7 +37,8 @@
         "onCommand:jsonAtlas.openVisualizerPanel",
         "onCommand:jsonAtlas.explainSelection",
         "onCommand:jsonAtlas.generateEditProposals",
-        "onCommand:jsonAtlas.generateSchemaUpdates"
+        "onCommand:jsonAtlas.generateSchemaUpdates",
+        "onCommand:jsonAtlas.associateSchema"
     ],
     "contributes": {
         "commands": [
@@ -78,6 +79,11 @@
             {
                 "command": "jsonAtlas.generateSchemaUpdates",
                 "title": "JSON Atlas: Generate AI Schema Updates",
+                "category": "JSON Atlas"
+            },
+            {
+                "command": "jsonAtlas.associateSchema",
+                "title": "JSON Atlas: Associate Schema",
                 "category": "JSON Atlas"
             },
             {
@@ -149,6 +155,11 @@
                     "command": "jsonAtlas.goToSchemaDefinition",
                     "when": "resourceLangId == json || resourceLangId == jsonc",
                     "group": "navigation@103"
+                },
+                {
+                    "command": "jsonAtlas.associateSchema",
+                    "when": "resourceLangId == json || resourceLangId == jsonc",
+                    "group": "navigation@104"
                 }
             ]
         },
@@ -158,12 +169,29 @@
                 "jsonAtlas.enableSchemaValidation": {
                     "type": "boolean",
                     "default": false,
-                    "description": "Validate JSON documents against a schema defined by jsonAtlas.schemaPath."
+                    "description": "Enable schema-aware validation, navigation, and completions for JSON documents. Schemas are resolved automatically via $schema, VS Code json.schemas, Atlas associations, or manual assignments."
                 },
-                "jsonAtlas.schemaPath": {
-                    "type": "string",
-                    "default": "",
-                    "markdownDescription": "Absolute or workspace-relative path to a JSON Schema file used for validation. Example: `schemas/payload.schema.json`."
+                "jsonAtlas.schemas": {
+                    "type": "array",
+                    "default": [],
+                    "markdownDescription": "Optional array of schema associations. Each entry maps a glob `pattern` (workspace-relative) to a `schema` URI or path. Example: `{ \"pattern\": \"apis/**/request*.json\", \"schema\": \"schemas/request.schema.json\" }`.",
+                    "items": {
+                        "type": "object",
+                        "required": [
+                            "pattern",
+                            "schema"
+                        ],
+                        "properties": {
+                            "pattern": {
+                                "type": "string",
+                                "description": "Glob pattern that matches JSON documents (workspace-relative)."
+                            },
+                            "schema": {
+                                "type": "string",
+                                "description": "Schema URI or path (workspace-relative, absolute filesystem path, or http/https URL)."
+                            }
+                        }
+                    }
                 },
                 "jsonAtlas.autoSaveOnEdit": {
                     "type": "boolean",
