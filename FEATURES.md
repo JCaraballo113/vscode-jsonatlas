@@ -20,6 +20,6 @@
 - Add filters such as “required only”, “schema warnings”, or “array density” that temporarily hide unrelated nodes.
 - Support color-coding based on schema metadata (deprecated/read-only) to highlight hot spots.
 
-## 6. Workspace Schema Dashboard ⏳ Incomplete
+## 6. Workspace Schema Dashboard ✅ Completed
 - Scan all JSON files in the workspace, report which schema they use, and summarize validation status (pass/fail/error counts).
 - Provide commands to open failing documents or export the report for CI usage.

@@ -38,7 +38,11 @@
         "onCommand:jsonAtlas.explainSelection",
         "onCommand:jsonAtlas.generateEditProposals",
         "onCommand:jsonAtlas.generateSchemaUpdates",
-        "onCommand:jsonAtlas.associateSchema"
+        "onCommand:jsonAtlas.associateSchema",
+        "onCommand:jsonAtlas.showWorkspaceSchemaDashboard",
+        "onCommand:jsonAtlas.scanWorkspaceSchemas",
+        "onCommand:jsonAtlas.openWorkspaceSchemaFailures",
+        "onCommand:jsonAtlas.exportWorkspaceSchemaReport"
     ],
     "contributes": {
         "commands": [
@@ -94,6 +98,26 @@
             {
                 "command": "jsonAtlas.goToSchemaDefinition",
                 "title": "JSON Atlas: Go to Schema Definition",
+                "category": "JSON Atlas"
+            },
+            {
+                "command": "jsonAtlas.showWorkspaceSchemaDashboard",
+                "title": "JSON Atlas: Show Workspace Schema Dashboard",
+                "category": "JSON Atlas"
+            },
+            {
+                "command": "jsonAtlas.scanWorkspaceSchemas",
+                "title": "JSON Atlas: Scan Workspace Schemas",
+                "category": "JSON Atlas"
+            },
+            {
+                "command": "jsonAtlas.openWorkspaceSchemaFailures",
+                "title": "JSON Atlas: Open Failing JSON Documents",
+                "category": "JSON Atlas"
+            },
+            {
+                "command": "jsonAtlas.exportWorkspaceSchemaReport",
+                "title": "JSON Atlas: Export Workspace Schema Report",
                 "category": "JSON Atlas"
             }
         ],

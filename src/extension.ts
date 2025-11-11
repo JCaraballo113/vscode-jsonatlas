@@ -2,16 +2,17 @@ import { createHash } from 'crypto';
 import * as nodePath from 'path';
 import { minimatch } from 'minimatch';
 import * as vscode from 'vscode';
-import { findNodeAtLocation, findNodeAtOffset, getLocation, getNodeValue, Node, parseTree, ParseError, ParseOptions, printParseErrorCode } from 'jsonc-parser';
+import { findNodeAtLocation, findNodeAtOffset, getLocation, getNodeValue, Node, ParseError, printParseErrorCode } from 'jsonc-parser';
 import { GraphLayoutPreset, VisualizerPanel, VisualizerSchemaPointerEntry, VisualizerSelectionInfo } from './visualizerPanel';
 import { SchemaInsight, SchemaNavigationTarget, SchemaValidator } from './schemaValidator';
 import { SchemaInsightsViewProvider, VisualizerSchemaInsight } from './schemaInsightsView';
 import { AiService, EditProposal, SchemaUpdateProposal } from './aiService';
 import { SummaryViewProvider } from './summaryView';
 import { SchemaAssociationStore } from './schemaAssociations';
+import { analyzeJsonText, JsonAnalysisResult } from './jsonAnalysis';
+import { WorkspaceSchemaScanner } from './workspaceSchemaScanner';
 
 const SUPPORTED_LANGUAGES = new Set(['json', 'jsonc']);
-const parseOptions: ParseOptions = { allowTrailingComma: true, disallowComments: false };
 const schemaValidator = new SchemaValidator();
 const autoSummaryDocs = new Set<string>();
 const autoVisualizerDocs = new Set<string>();
@@ -50,7 +51,8 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(outputChannel);
   aiService = new AiService(context);
   summaryViewProvider = new SummaryViewProvider(context.extensionUri, aiService);
-  schemaInsightsProvider = new SchemaInsightsViewProvider(context.extensionUri);
+  const workspaceSchemaScanner = new WorkspaceSchemaScanner(schemaValidator);
+  schemaInsightsProvider = new SchemaInsightsViewProvider(context.extensionUri, workspaceSchemaScanner);
   schemaAssociationStore = new SchemaAssociationStore();
   schemaValidator.setAssociationStore(schemaAssociationStore);
 
@@ -148,6 +150,19 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('jsonAtlas.associateSchema', () => handleAssociateSchemaCommand()),
     vscode.commands.registerCommand('jsonAtlas.goToSchemaDefinition', (args?: GoToSchemaDefinitionCommandArgs) =>
       handleGoToSchemaDefinitionCommand(args)
+    ),
+    vscode.commands.registerCommand('jsonAtlas.showWorkspaceSchemaDashboard', async () => {
+      await schemaInsightsProvider.revealView();
+      await schemaInsightsProvider.runWorkspaceScan();
+    }),
+    vscode.commands.registerCommand('jsonAtlas.scanWorkspaceSchemas', () =>
+      schemaInsightsProvider.runWorkspaceScan({ reveal: true })
+    ),
+    vscode.commands.registerCommand('jsonAtlas.openWorkspaceSchemaFailures', () =>
+      schemaInsightsProvider.showWorkspaceFailurePicker()
+    ),
+    vscode.commands.registerCommand('jsonAtlas.exportWorkspaceSchemaReport', () =>
+      schemaInsightsProvider.exportWorkspaceReport({ forceRescan: true })
     )
   );
 
@@ -534,11 +549,8 @@ async function handleOpenVisualizerPanelCommand(context: vscode.ExtensionContext
   await handleVisualizerCommand(context);
 }
 
-function analyzeDocument(document: vscode.TextDocument): { errors: ParseError[]; root: Node | undefined; data: unknown } {
-  const errors: ParseError[] = [];
-  const root = parseTree(document.getText(), errors, parseOptions);
-  const data = root ? getNodeValue(root) : undefined;
-  return { errors, root, data };
+function analyzeDocument(document: vscode.TextDocument): JsonAnalysisResult {
+  return analyzeJsonText(document.getText());
 }
 
 function buildDiagnosticsFromErrors(document: vscode.TextDocument, errors: ParseError[]): vscode.Diagnostic[] {
