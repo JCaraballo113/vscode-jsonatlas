@@ -16,7 +16,7 @@
 - Have the AI analyze existing JSON payloads and propose schema changes (new enums, oneOf branches, etc.).
 - Present proposals in a diff/review UI before applying them to the schema file.
 
-## 5. Visualizer Focus Modes ⏳ Incomplete
+## 5. Visualizer Focus Modes ✅ Completed
 - Add filters such as “required only”, “schema warnings”, or “array density” that temporarily hide unrelated nodes.
 - Support color-coding based on schema metadata (deprecated/read-only) to highlight hot spots.
 

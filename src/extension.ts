@@ -69,6 +69,7 @@ export function activate(context: vscode.ExtensionContext) {
       VisualizerPanel.updateSchemaPointers(document.uri, undefined);
       schemaInsightsCache.delete(key);
       schemaInsightsProvider.clearInsights(document.uri);
+      VisualizerPanel.updateSchemaInsights(document.uri, undefined);
       invalidateSummaryCacheForDocument(document.uri);
       selectionFragmentDocs.delete(key);
       lastFocusedPathByDocument.delete(key);
@@ -94,6 +95,7 @@ export function activate(context: vscode.ExtensionContext) {
         schemaInsightsCache.clear();
         for (const uri of insightUris) {
           schemaInsightsProvider.clearInsights(uri);
+          VisualizerPanel.updateSchemaInsights(uri, undefined);
         }
         if (vscode.window.activeTextEditor) {
           void refreshDiagnostics(vscode.window.activeTextEditor.document);
@@ -175,6 +177,7 @@ async function refreshDiagnostics(document: vscode.TextDocument): Promise<void> 
     schemaPointerCache.delete(cacheKey);
     VisualizerPanel.updateSchemaPointers(document.uri, undefined);
     schemaInsightsCache.delete(cacheKey);
+    VisualizerPanel.updateSchemaInsights(document.uri, undefined);
     diagnostics.set(document.uri, buildDiagnosticsFromErrors(document, analysis.errors));
     const first = analysis.errors[0];
     const location = document.positionAt(first.offset);
@@ -194,6 +197,7 @@ async function refreshDiagnostics(document: vscode.TextDocument): Promise<void> 
   if (shouldDisplayInsights(document)) {
     schemaInsightsProvider.setInsights(document, insightsPayload);
   }
+  VisualizerPanel.updateSchemaInsights(document.uri, insightsPayload);
   rebuildSchemaPointers(document, analysis.root);
   VisualizerPanel.updateIfActive(document.uri, selectionPayload.data, selectionPayload.selection, {
     schemaPointers: selectionPayload.schemaPointers,
@@ -232,6 +236,7 @@ async function handleVisualizerCommand(context: vscode.ExtensionContext) {
   if (shouldDisplayInsights(editor.document)) {
     schemaInsightsProvider.setInsights(editor.document, insightsPayload);
   }
+  VisualizerPanel.updateSchemaInsights(editor.document.uri, insightsPayload);
   VisualizerPanel.render(
     context.extensionUri,
     selectionPayload.data,
@@ -784,13 +789,19 @@ function buildSchemaPointerMap(
   const visit = (node: Node, path: JsonPath) => {
     const target = schemaValidator.resolveNavigationTarget(document.uri, path);
     if (target) {
+      const meta = schemaValidator.resolveSchemaForJsonPath(document.uri, path);
+      const required = isPathSchemaRequired(document, path);
       result.set(encodeVisualizerPath(path), {
         pointer: target.pointer,
         uri: target.uri,
         offset: target.offset,
         length: target.length,
         title: target.title,
-        description: target.description
+        description: target.description,
+        required: required || undefined,
+        deprecated: readSchemaBooleanFlag(meta?.schema, 'deprecated'),
+        readOnly: readSchemaBooleanFlag(meta?.schema, 'readOnly'),
+        writeOnly: readSchemaBooleanFlag(meta?.schema, 'writeOnly')
       });
     }
 
@@ -819,6 +830,46 @@ function buildSchemaPointerMap(
 
   visit(root, []);
   return result.size ? result : undefined;
+}
+
+function isPathSchemaRequired(document: vscode.TextDocument, path: JsonPath): boolean {
+  if (!path.length) {
+    return false;
+  }
+  const parentPath = path.slice(0, -1);
+  const lastSegment = path[path.length - 1];
+  if (typeof lastSegment !== 'string') {
+    return false;
+  }
+  const parentResolution = schemaValidator.resolveSchemaForJsonPath(document.uri, parentPath);
+  if (!parentResolution) {
+    return false;
+  }
+  return isPropertyRequiredInSchema(parentResolution.schema, lastSegment);
+}
+
+function isPropertyRequiredInSchema(schema: unknown, key: string, seen = new Set<unknown>()): boolean {
+  if (!isPlainObject(schema) || seen.has(schema)) {
+    return false;
+  }
+  seen.add(schema);
+  const required = schema.required;
+  if (Array.isArray(required) && required.some((entry) => entry === key)) {
+    return true;
+  }
+  const composites = schema.allOf;
+  if (Array.isArray(composites)) {
+    return composites.some((candidate) => isPropertyRequiredInSchema(candidate, key, seen));
+  }
+  return false;
+}
+
+function readSchemaBooleanFlag(schema: unknown, key: string): boolean | undefined {
+  if (!isPlainObject(schema)) {
+    return undefined;
+  }
+  const value = schema[key];
+  return typeof value === 'boolean' ? value : undefined;
 }
 
 function buildVisualizerSchemaInsights(

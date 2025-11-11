@@ -4,6 +4,8 @@
   const status = document.getElementById('status');
   const viewSelect = document.getElementById('visualizerViewSelect');
   const layoutPresetSelect = document.getElementById('layoutPresetSelect');
+  const focusModeSelect = document.getElementById('focusModeSelect');
+  const focusModeNotice = document.getElementById('focusModeNotice');
   const searchInput = document.getElementById('visualizerSearchInput');
   const chatToggle = document.getElementById('chatToggle');
   const chatPanel = document.getElementById('chatPanel');
@@ -87,6 +89,15 @@
   let activeModelProvider = 'openai';
   let currentLayoutPreset: LayoutPreset = 'balanced';
   let configDefaultLayoutPreset: LayoutPreset = 'balanced';
+  type FocusMode = 'all' | 'required' | 'warnings' | 'arrays';
+  let focusMode: FocusMode = normalizeFocusMode(
+    typeof persistedState.focusMode === 'string' ? persistedState.focusMode : 'all'
+  );
+  let requiredPathSet = new Set<string>();
+  let schemaWarningPaths = new Set<string>();
+  let schemaInsightSeverity = new Map<string, 'error' | 'warning'>();
+  let denseArrayPaths = new Set<string>();
+  const pathSegmentCache = new Map<string, (string | number)[]>();
 
   const LAYOUT_PRESETS = {
     compact: { gapX: 210, gapY: 70 },
@@ -112,6 +123,7 @@
     unknown: 'unknown'
   };
   const EDITABLE_VALUE_KINDS = new Set(['string', 'number', 'boolean', 'null', 'link']);
+  const ARRAY_DENSITY_THRESHOLD = 25;
   const ROOT_PATH = JSON.stringify([]);
   const ICON_SVGS = {
     object:
@@ -136,6 +148,10 @@
     pointer: string;
     title?: string;
     description?: string;
+    required?: boolean;
+    deprecated?: boolean;
+    readOnly?: boolean;
+    writeOnly?: boolean;
   };
 
   let schemaPointerIndex = new Map<string, SchemaPointerInfo>();
@@ -157,6 +173,14 @@
       const value = event.target.value;
       const next = normalizeLayoutPreset(value);
       applyLayoutPreset(next);
+    });
+  }
+
+  if (focusModeSelect instanceof HTMLSelectElement) {
+    focusModeSelect.value = focusMode;
+    focusModeSelect.addEventListener('change', (event) => {
+      const next = normalizeFocusMode(event.target.value);
+      setFocusMode(next);
     });
   }
 
@@ -398,25 +422,281 @@
       rerenderFromState();
       return;
     }
+
+    if (type === 'schema:insights') {
+      applySchemaInsights(payload);
+      return;
+    }
   });
 
   vscode.postMessage({ type: 'ready' });
 
   function applySchemaPointers(raw: Record<string, SchemaPointerInfo | undefined> | undefined) {
     schemaPointerIndex = new Map<string, SchemaPointerInfo>();
+    requiredPathSet = new Set<string>();
     if (!raw || typeof raw !== 'object') {
+      applyFocusMode();
       return;
     }
     Object.entries(raw).forEach(([path, info]) => {
       if (!info || typeof info.pointer !== 'string') {
         return;
       }
-      schemaPointerIndex.set(path, {
+      const normalized: SchemaPointerInfo = {
         pointer: info.pointer,
         title: typeof info.title === 'string' ? info.title : undefined,
-        description: typeof info.description === 'string' ? info.description : undefined
-      });
+        description: typeof info.description === 'string' ? info.description : undefined,
+        required: info.required === true,
+        deprecated: info.deprecated === true,
+        readOnly: info.readOnly === true,
+        writeOnly: info.writeOnly === true
+      };
+      schemaPointerIndex.set(path, normalized);
+      if (normalized.required) {
+        requiredPathSet.add(path);
+      }
     });
+    applyInsightHighlights();
+    applyFocusMode();
+  }
+
+  function applySchemaInsights(raw: unknown) {
+    schemaInsightSeverity = new Map<string, 'error' | 'warning'>();
+    schemaWarningPaths = new Set<string>();
+    if (!Array.isArray(raw)) {
+      applyInsightHighlights();
+      applyFocusMode();
+      return;
+    }
+
+    raw.forEach((entry) => {
+      if (!entry || typeof entry !== 'object') {
+        return;
+      }
+      const pathKey = typeof (entry as { pathKey?: string }).pathKey === 'string' ? (entry as { pathKey: string }).pathKey : undefined;
+      if (!pathKey) {
+        return;
+      }
+      const severity = (entry as { severity?: string }).severity === 'error' ? 'error' : 'warning';
+      schemaInsightSeverity.set(pathKey, severity);
+      schemaWarningPaths.add(pathKey);
+    });
+
+    applyInsightHighlights();
+    applyFocusMode();
+  }
+
+  function setFocusMode(mode: FocusMode) {
+    const normalized = normalizeFocusMode(mode);
+    if (focusMode === normalized) {
+      return;
+    }
+    focusMode = normalized;
+    if (focusModeSelect instanceof HTMLSelectElement) {
+      focusModeSelect.value = normalized;
+    }
+    persistState({ savePositions: false });
+    applyFocusMode();
+  }
+
+  function normalizeFocusMode(value: unknown): FocusMode {
+    if (value === 'required' || value === 'warnings' || value === 'arrays') {
+      return value;
+    }
+    return 'all';
+  }
+
+  function getFocusSourceSet(): Set<string> | undefined {
+    if (focusMode === 'required') {
+      return requiredPathSet;
+    }
+    if (focusMode === 'warnings') {
+      return schemaWarningPaths;
+    }
+    if (focusMode === 'arrays') {
+      return denseArrayPaths;
+    }
+    return undefined;
+  }
+
+  function applyFocusMode() {
+    if (focusModeSelect instanceof HTMLSelectElement) {
+      focusModeSelect.value = focusMode;
+    }
+
+    const sourceSet = getFocusSourceSet();
+    if (focusMode === 'all') {
+      clearFocusFilters();
+      showFocusModeNotice('');
+      return;
+    }
+
+    const hasSources = sourceSet && sourceSet.size > 0;
+    if (!hasSources) {
+      clearFocusFilters();
+      showFocusModeNotice(getEmptyFocusMessage(focusMode));
+      return;
+    }
+
+    const sourceList = Array.from(sourceSet!);
+    showFocusModeNotice('');
+
+    nodeElements.forEach(({ element }) => {
+      const path = element.dataset.path;
+      const visible = isPathVisibleForSources(path, sourceSet!, sourceList);
+      element.classList.toggle('is-filter-hidden', !visible);
+    });
+
+    treeRoot.querySelectorAll('.tree-branch').forEach((branch) => {
+      const path = branch.getAttribute('data-path');
+      const visible = isPathVisibleForSources(path, sourceSet!, sourceList);
+      branch.classList.toggle('is-filter-hidden', !visible);
+    });
+
+    linksLayer?.querySelectorAll('.visualizer-link').forEach((link) => {
+      const from = link.getAttribute('data-from');
+      const to = link.getAttribute('data-to');
+      const visible =
+        isPathVisibleForSources(from, sourceSet!, sourceList) &&
+        isPathVisibleForSources(to, sourceSet!, sourceList);
+      link.classList.toggle('is-filter-hidden', !visible);
+    });
+  }
+
+  function clearFocusFilters() {
+    nodeElements.forEach(({ element }) => element.classList.remove('is-filter-hidden'));
+    treeRoot.querySelectorAll('.tree-branch').forEach((branch) => branch.classList.remove('is-filter-hidden'));
+    linksLayer?.querySelectorAll('.visualizer-link').forEach((link) => link.classList.remove('is-filter-hidden'));
+  }
+
+  function isPathVisibleForSources(pathKey: string | null | undefined, sourceSet: Set<string>, sourceList: string[]): boolean {
+    if (!pathKey) {
+      return true;
+    }
+    if (sourceSet.has(pathKey)) {
+      return true;
+    }
+    if (hasAncestorInSources(pathKey, sourceSet)) {
+      return true;
+    }
+    return hasDescendantInSources(pathKey, sourceList);
+  }
+
+  function hasAncestorInSources(pathKey: string, sourceSet: Set<string>): boolean {
+    const segments = parsePathSegments(pathKey);
+    while (segments.length) {
+      segments.pop();
+      const ancestorKey = serializePath(segments);
+      if (sourceSet.has(ancestorKey)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function hasDescendantInSources(pathKey: string, sourceList: string[]): boolean {
+    if (!sourceList.length) {
+      return false;
+    }
+    for (const candidate of sourceList) {
+      if (isAncestorPath(pathKey, candidate)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function isAncestorPath(maybeAncestorKey: string, candidateKey: string): boolean {
+    const ancestorSegments = parsePathSegments(maybeAncestorKey);
+    const candidateSegments = parsePathSegments(candidateKey);
+    if (ancestorSegments.length >= candidateSegments.length) {
+      return false;
+    }
+    for (let index = 0; index < ancestorSegments.length; index += 1) {
+      if (ancestorSegments[index] !== candidateSegments[index]) {
+        return false;
+      }
+    }
+    return ancestorSegments.length > 0 || maybeAncestorKey === '[]';
+  }
+
+  function parsePathSegments(pathKey: string | null | undefined): (string | number)[] {
+    if (!pathKey) {
+      return [];
+    }
+    const cached = pathSegmentCache.get(pathKey);
+    if (cached) {
+      return cached.slice();
+    }
+    try {
+      const parsed = JSON.parse(pathKey);
+      if (Array.isArray(parsed)) {
+        pathSegmentCache.set(pathKey, parsed);
+        return parsed.slice();
+      }
+    } catch {
+      // ignore parse errors
+    }
+    return [];
+  }
+
+  function showFocusModeNotice(message?: string) {
+    if (!(focusModeNotice instanceof HTMLElement)) {
+      return;
+    }
+    if (!message) {
+      focusModeNotice.textContent = '';
+      focusModeNotice.setAttribute('hidden', 'true');
+      return;
+    }
+    focusModeNotice.textContent = message;
+    focusModeNotice.removeAttribute('hidden');
+  }
+
+  function getEmptyFocusMessage(mode: FocusMode): string {
+    switch (mode) {
+      case 'required':
+        return 'No required properties detected.';
+      case 'warnings':
+        return 'No schema warnings detected.';
+      case 'arrays':
+        return `No arrays with ≥ ${ARRAY_DENSITY_THRESHOLD} items detected.`;
+      default:
+        return '';
+    }
+  }
+
+  function applyInsightHighlights() {
+    nodeElements.forEach(({ element }) => {
+      const path = element.dataset.path;
+      const severity = path ? schemaInsightSeverity.get(path) : undefined;
+      toggleInsightHighlight(element, severity);
+    });
+
+    treeRoot.querySelectorAll('.tree-node').forEach((node) => {
+      const path = node.getAttribute('data-path');
+      const severity = path ? schemaInsightSeverity.get(path) : undefined;
+      if (severity) {
+        node.classList.add('has-schema-warning');
+        node.setAttribute('data-schema-severity', severity);
+      } else {
+        node.classList.remove('has-schema-warning');
+        node.removeAttribute('data-schema-severity');
+      }
+    });
+  }
+
+  function toggleInsightHighlight(element: HTMLElement | undefined, severity?: 'error' | 'warning') {
+    if (!element) {
+      return;
+    }
+    if (!severity) {
+      element.classList.remove('has-schema-warning');
+      element.removeAttribute('data-schema-severity');
+      return;
+    }
+    element.classList.add('has-schema-warning');
+    element.setAttribute('data-schema-severity', severity);
   }
 
 
@@ -435,7 +715,8 @@
       viewMode,
       nodePositions: nodePositionStore,
       controlsCollapsed,
-      layoutPresets: layoutPresetStore
+      layoutPresets: layoutPresetStore,
+      focusMode
     };
     if (typeof vscode.setState === 'function') {
       vscode.setState(persistedState);
@@ -493,6 +774,8 @@
     if (currentDocumentId === documentId) {
       return;
     }
+
+    pathSegmentCache.clear();
 
     if (currentDocumentId) {
       persistState();
@@ -954,6 +1237,7 @@
   function renderData(data) {
     hideStatus();
     pathDepths.clear();
+    denseArrayPaths = new Set<string>();
     const graphData = buildGraph(data);
     updateSearchIndex(graphData.nodes);
 
@@ -1016,6 +1300,9 @@
       focusGraphNode(ROOT_PATH);
       needsInitialGraphFocus = false;
     }
+
+    applyInsightHighlights();
+    applyFocusMode();
   }
 
   function renderTreeView(payload) {
@@ -1028,6 +1315,9 @@
     tree.setAttribute('role', 'tree');
     tree.appendChild(buildTreeBranch('JSON', payload, [], 0));
     treeRoot.appendChild(tree);
+
+    applyInsightHighlights();
+    applyFocusMode();
   }
 
   function buildTreeBranch(key, value, path, depth) {
@@ -1041,6 +1331,7 @@
 
     const listItem = document.createElement('li');
     listItem.className = 'tree-branch';
+    listItem.dataset.path = pathKey;
     listItem.dataset.depth = String(depth);
     if (hasChildren) {
       listItem.setAttribute('aria-expanded', String(!isCollapsed));
@@ -1117,6 +1408,7 @@
     treeRoot.setAttribute('hidden', 'true');
     status.textContent = message || 'The document contains syntax errors.';
     status.removeAttribute('hidden');
+    showFocusModeNotice('');
   }
 
   function hideStatus() {
@@ -1154,6 +1446,8 @@
         canRename: typeof lastSegment === 'string',
         schemaPointer: schemaInfo
       };
+
+      trackArrayDensity(pathKey, value);
 
       nodes.push(node);
       maxDepth = Math.max(maxDepth, depth);
@@ -1331,6 +1625,8 @@
         `M ${startX} ${startY} C ${startX + controlOffset} ${startY}, ${endX - controlOffset} ${endY}, ${endX} ${endY}`
       );
       path.setAttribute('class', 'visualizer-link');
+      path.dataset.from = edge.from;
+      path.dataset.to = edge.to;
       linksLayer.appendChild(path);
     });
   }
@@ -1385,6 +1681,12 @@
     }
 
     return [];
+  }
+
+  function trackArrayDensity(pathKey, value) {
+    if (Array.isArray(value) && value.length >= ARRAY_DENSITY_THRESHOLD) {
+      denseArrayPaths.add(pathKey);
+    }
   }
 
   function describeValue(value) {
@@ -1519,6 +1821,10 @@
       element.title = baseTitle ? `${baseTitle}\n${editHint}` : editHint;
     }
 
+    if (options.schemaPointer) {
+      applySchemaMetadataClasses(element, options.schemaPointer);
+    }
+
     if (options.schemaPointer && options.path) {
       element.appendChild(createSchemaButton(options.schemaPointer, options.path));
     }
@@ -1558,6 +1864,31 @@
     const pointerLabel = schemaPointer.pointer || 'schema';
     button.setAttribute('aria-label', `Go to schema definition (${pointerLabel})`);
     return button;
+  }
+
+  function applySchemaMetadataClasses(element, schemaPointer: SchemaPointerInfo) {
+    if (!schemaPointer) {
+      return;
+    }
+    if (schemaPointer.deprecated) {
+      element.classList.add('value--deprecated');
+      element.appendChild(createValueBadge('Deprecated', 'deprecated'));
+    }
+    if (schemaPointer.readOnly) {
+      element.classList.add('value--readonly');
+      element.appendChild(createValueBadge('Read-only', 'readonly'));
+    }
+    if (schemaPointer.writeOnly) {
+      element.classList.add('value--writeonly');
+      element.appendChild(createValueBadge('Write-only', 'writeonly'));
+    }
+  }
+
+  function createValueBadge(label: string, variant: string) {
+    const badge = document.createElement('span');
+    badge.className = `value-badge value-badge--${variant}`;
+    badge.textContent = label;
+    return badge;
   }
 
   function truncate(value, limit = 28) {

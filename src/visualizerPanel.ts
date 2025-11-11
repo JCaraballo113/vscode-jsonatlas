@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { Segment, visit } from 'jsonc-parser';
 import { AiService } from './aiService';
 import { CoreMessage } from 'ai';
+import { VisualizerSchemaInsight } from './schemaInsightsView';
 
 const renameParseOptions = {
     allowTrailingComma: true,
@@ -24,12 +25,20 @@ export interface VisualizerSchemaPointerEntry {
     length?: number;
     title?: string;
     description?: string;
+    required?: boolean;
+    deprecated?: boolean;
+    readOnly?: boolean;
+    writeOnly?: boolean;
 }
 
 interface SchemaPointerPreview {
     pointer: string;
     title?: string;
     description?: string;
+    required?: boolean;
+    deprecated?: boolean;
+    readOnly?: boolean;
+    writeOnly?: boolean;
 }
 
 interface VisualizerUpdateOptions {
@@ -138,6 +147,13 @@ export class VisualizerPanel {
         VisualizerPanel.currentPanel.applySchemaPointerUpdate(pointers);
     }
 
+    public static updateSchemaInsights(documentUri: vscode.Uri, insights?: VisualizerSchemaInsight[]) {
+        if (!VisualizerPanel.currentPanel?.isForDocument(documentUri)) {
+            return;
+        }
+        VisualizerPanel.currentPanel.applySchemaInsights(insights);
+    }
+
 
     public static focusRoot(documentUri: vscode.Uri) {
         if (!VisualizerPanel.currentPanel?.isForDocument(documentUri)) {
@@ -188,6 +204,7 @@ export class VisualizerPanel {
     private data: unknown;
     private selectionInfo: VisualizerSelectionInfo | undefined;
     private schemaPointers = new Map<string, VisualizerSchemaPointerEntry>();
+    private schemaInsights: VisualizerSchemaInsight[] = [];
     private graphLayoutPreset: GraphLayoutPreset | undefined;
     private isWebviewReady = false;
     private pendingInvalidMessage: string | undefined;
@@ -383,6 +400,7 @@ export class VisualizerPanel {
                     this.graphLayoutPreset ?? this.getPreferredLayoutPreset(),
             },
         });
+        this.postSchemaInsights();
         this.postChatHistory();
         void this.postAiStatus();
         this.postChatModelConfig();
@@ -442,6 +460,15 @@ export class VisualizerPanel {
         this.postSchemaPointers();
     }
 
+    private applySchemaInsights(insights?: VisualizerSchemaInsight[]) {
+        if (insights) {
+            this.schemaInsights = insights.slice();
+        } else {
+            this.schemaInsights = [];
+        }
+        this.postSchemaInsights();
+    }
+
     private postSchemaPointers() {
         if (!this.isWebviewReady) {
             return;
@@ -449,6 +476,16 @@ export class VisualizerPanel {
         this.panel.webview.postMessage({
             type: 'schema:pointers',
             payload: this.serializeSchemaPointers(),
+        });
+    }
+
+    private postSchemaInsights() {
+        if (!this.isWebviewReady) {
+            return;
+        }
+        this.panel.webview.postMessage({
+            type: 'schema:insights',
+            payload: this.schemaInsights,
         });
     }
 
@@ -462,6 +499,10 @@ export class VisualizerPanel {
                 pointer: entry.pointer,
                 title: entry.title,
                 description: entry.description,
+                required: entry.required,
+                deprecated: entry.deprecated,
+                readOnly: entry.readOnly,
+                writeOnly: entry.writeOnly,
             };
         }
         return payload;
@@ -1197,6 +1238,15 @@ export class VisualizerPanel {
             </select>
           </div>
           <div class="view-switcher__group">
+            <label for="focusModeSelect">Focus</label>
+            <select id="focusModeSelect">
+              <option value="all">Everything</option>
+              <option value="required">Required only</option>
+              <option value="warnings">Schema warnings</option>
+              <option value="arrays">Array density</option>
+            </select>
+          </div>
+          <div class="view-switcher__group">
             <label for="visualizerSearchInput">Find</label>
             <input id="visualizerSearchInput" type="search" placeholder="Search keys or values" />
           </div>
@@ -1211,6 +1261,7 @@ export class VisualizerPanel {
             <button type="button" id="selectionClearButton">Clear</button>
           </form>
         </div>
+        <div id="focusModeNotice" class="focus-mode-notice" hidden></div>
       </div>
     </section>
     <section id="chatPanel" class="chat-panel" hidden>

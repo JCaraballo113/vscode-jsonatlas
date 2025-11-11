@@ -10,6 +10,7 @@ JSON Atlas keeps your JSON documents healthy by surfacing syntax errors in-line,
 - **Schema Insights view** (next to the Summary panel) lists missing required props, type mismatches, and other validation issues, with one-click focus in the visualizer or jump-to-editor actions.
 - **Visualizer view** that turns a valid JSON tree into a tidy, zoom-independent overview so you can reason about large payloads at a glance and now auto-refreshes as you type. Every depth level becomes its own collapsible box with a key-to-value link, so you can fold away branches while keeping the surrounding context visible.
 - **Graph & Tree modes** selectable via the view dropdown: the Graph view offers pan/zoom with smooth connectors, while the Tree view keeps a classic outline for folks who prefer a stacked hierarchy. Both modes keep URL values clickable.
+- **Focus modes & schema badges** so you can filter to required nodes, schema warnings, or dense arrays while deprecated/read-only values get inline badges for instant triage.
 - **Graph layout presets** (compact, balanced, relaxed) that you can switch from the control dock or via `jsonAtlas.graphLayoutPreset`, adjusting spacing/line lengths without rebuilding the document.
 - **Inline rename**: click any key label in either view to rename the underlying property and apply the edit directly to the JSON document.
 - **Draggable layout** in Graph mode so you can rearrange nodes to highlight the relationships you care about; per-document positions persist between renders.
