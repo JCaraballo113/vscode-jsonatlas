@@ -3,11 +3,11 @@
     "displayName": "JSON Atlas",
     "description": "JSON Atlas keeps JSON files healthy with inline diagnostics, an interactive visualizer, and AI-powered summaries/chat.",
     "version": "0.0.1",
-    "publisher": "jsonlabs",
+    "publisher": "jclabs",
     "license": "MIT",
     "repository": {
         "type": "git",
-        "url": "https://example.com/json-atlas.git"
+        "url": "https://github.com/JCaraballo113/vscode-jsonatlas.git"
     },
     "type": "commonjs",
     "main": "./dist/extension.js",
@@ -47,10 +47,10 @@
     "contributes": {
         "commands": [
             {
-                    "command": "jsonAtlas.showVisualizer",
-                    "title": "JSON Atlas: Show Visualizer",
-                    "category": "JSON Atlas",
-                    "icon": {
+                "command": "jsonAtlas.showVisualizer",
+                "title": "JSON Atlas: Show Visualizer",
+                "category": "JSON Atlas",
+                "icon": {
                     "light": "media/icons/atlas.png",
                     "dark": "media/icons/atlas.png"
                 }
