@@ -2,6 +2,8 @@
 
 JSON Atlas keeps your JSON documents healthy by surfacing syntax errors in-line, visualizing the structure in multiple modes, and layering on AI summaries plus chat assistance.
 
+If you live in JSON every day, JSON Atlas is the teammate that never gets tired. It catches parser mistakes before you switch windows, maps huge payloads into an interactive visual graph, and keeps schemas honest with one-click insights. Pair that with inline AI summaries, diffable schema proposals, and a workspace-wide health report, and you get a workflow upgrade that saves minutes on every edit while preserving trust in your APIs.
+
 ## Features
 
 - **Real-time linting** for `json` and `jsonc` documents using the `jsonc-parser`, with inline diagnostics that point directly to the faulty token.
@@ -44,12 +46,3 @@ Set the following settings (Workspace recommended):
 - `jsonAtlas.insightExcludeGlobs`: glob array (defaults to `["**/.vscode/**", "**/*.schema.json"]`) that suppresses Schema Insight updates for matching files while still showing editor diagnostics.
 
 When enabled, the extension loads/compiles the schema with Ajv and surfaces additional diagnostics alongside the syntax errors.
-
-## Development
-
-```bash
-npm install
-npm run watch
-```
-
-For a one-off build run `npm run compile`. Launch the extension via the VS Code debugger using the `Run Extension` configuration. Packaging is available through `npm run package` (requires `vsce`).
