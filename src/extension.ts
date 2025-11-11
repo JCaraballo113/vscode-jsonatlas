@@ -5,7 +5,7 @@ import { findNodeAtLocation, findNodeAtOffset, getLocation, getNodeValue, Node, 
 import { GraphLayoutPreset, VisualizerPanel, VisualizerSchemaPointerEntry, VisualizerSelectionInfo } from './visualizerPanel';
 import { SchemaInsight, SchemaNavigationTarget, SchemaValidator } from './schemaValidator';
 import { SchemaInsightsViewProvider, VisualizerSchemaInsight } from './schemaInsightsView';
-import { AiService, EditProposal } from './aiService';
+import { AiService, EditProposal, SchemaUpdateProposal } from './aiService';
 import { SummaryViewProvider } from './summaryView';
 
 const SUPPORTED_LANGUAGES = new Set(['json', 'jsonc']);
@@ -132,6 +132,7 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('jsonAtlas.explainSelection', () => handleExplainSelectionCommand()),
     vscode.commands.registerCommand('jsonAtlas.openVisualizerPanel', () => handleOpenVisualizerPanelCommand(context)),
     vscode.commands.registerCommand('jsonAtlas.generateEditProposals', () => handleGenerateEditProposals()),
+    vscode.commands.registerCommand('jsonAtlas.generateSchemaUpdates', () => handleGenerateSchemaUpdates()),
     vscode.commands.registerCommand('jsonAtlas.goToSchemaDefinition', (args?: GoToSchemaDefinitionCommandArgs) =>
       handleGoToSchemaDefinitionCommand(args)
     )
@@ -355,6 +356,90 @@ async function handleGenerateEditProposals() {
   await handleProposalSelection(document, pick.proposal);
 }
 
+async function handleGenerateSchemaUpdates() {
+  const document = getSummarizableDocument();
+  if (!document) {
+    vscode.window.showErrorMessage('Open a JSON or JSONC document to generate schema updates.');
+    return;
+  }
+
+  if (!isSchemaValidationEnabled(document)) {
+    void vscode.window.showInformationMessage('Enable schema validation in settings to generate schema updates.');
+    return;
+  }
+
+  const ready = await ensureSchemaNavigationData(document);
+  if (!ready) {
+    void vscode.window.showInformationMessage('Schema data is unavailable. Ensure the schema path is configured and the document parses correctly.');
+    return;
+  }
+
+  const schemaInfo = schemaValidator.getSchemaInfo(document.uri);
+  if (!schemaInfo) {
+    void vscode.window.showInformationMessage('Unable to locate the schema for this document.');
+    return;
+  }
+
+  const schemaDocument = await vscode.workspace.openTextDocument(schemaInfo.uri);
+  const schemaName = getDocumentName(schemaDocument);
+  const model = aiService.getSelectedModelOption();
+  log(`Generate schema updates requested for ${schemaName} using model ${model.id}.`);
+
+  const controller = new AbortController();
+  let proposals: SchemaUpdateProposal[] = [];
+
+  try {
+    await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: `Generating schema updates for ${schemaName}`,
+        cancellable: true
+      },
+      async (progress, token) => {
+        progress.report({ message: 'Analyzing documents…' });
+        token.onCancellationRequested(() => controller.abort());
+        proposals = await aiService.generateSchemaProposals(document, schemaInfo, controller.signal);
+        log(`Provider returned ${proposals.length} schema proposals.`);
+      }
+    );
+  } catch (error) {
+    if (controller.signal.aborted) {
+      log('Schema update request was cancelled by the user.');
+      return;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    void vscode.window.showErrorMessage(`Failed to generate schema updates: ${message}`);
+    log(`Schema update request failed: ${message}`);
+    return;
+  }
+
+  if (!proposals.length) {
+    void vscode.window.showInformationMessage('No schema updates were generated.');
+    log('No schema update proposals were returned by the provider.');
+    return;
+  }
+
+  const items = proposals.map((proposal, index) => ({
+    label: proposal.title || `Schema Proposal ${index + 1}`,
+    description: truncate(proposal.summary || 'AI schema update', 60),
+    detail: formatMultiline(proposal.summary || 'AI schema update'),
+    proposal
+  }));
+
+  const pick = await vscode.window.showQuickPick(items, {
+    placeHolder: 'Select a schema update proposal to inspect',
+    matchOnDetail: true
+  });
+
+  if (!pick) {
+    log('User dismissed the schema proposal picker.');
+    return;
+  }
+
+  log(`User selected schema proposal "${pick.proposal.title}".`);
+  await handleSchemaProposalSelection(document, schemaDocument, pick.proposal);
+}
+
 async function handleOpenVisualizerPanelCommand(context: vscode.ExtensionContext) {
   const revealed = VisualizerPanel.revealExisting();
   if (revealed) {
@@ -547,6 +632,80 @@ async function applyProposalToDocument(document: vscode.TextDocument, proposal: 
 
   void vscode.window.showInformationMessage(`Applied proposal "${proposal.title}".`);
   log(`Applied proposal "${proposal.title}" to ${getDocumentName(document)}.`);
+}
+
+async function handleSchemaProposalSelection(
+  sampleDocument: vscode.TextDocument,
+  schemaDocument: vscode.TextDocument,
+  proposal: SchemaUpdateProposal
+): Promise<void> {
+  const action = await vscode.window.showQuickPick(['Apply Schema Update', 'View Diff', 'Cancel'], {
+    placeHolder: `${proposal.title}${proposal.summary ? ' — ' + proposal.summary : ''}`,
+    ignoreFocusOut: true
+  });
+
+  if (!action || action === 'Cancel') {
+    return;
+  }
+
+  if (action === 'Apply Schema Update') {
+    await applySchemaProposal(sampleDocument, schemaDocument, proposal);
+    return;
+  }
+
+  if (action === 'View Diff') {
+    await showSchemaProposalDiff(schemaDocument, proposal);
+    const followup = await vscode.window.showQuickPick(['Apply Update', 'Cancel'], {
+      placeHolder: `Diff opened for "${proposal.title}". Choose an action.`,
+      ignoreFocusOut: true
+    });
+    if (followup === 'Apply Update') {
+      await applySchemaProposal(sampleDocument, schemaDocument, proposal);
+    }
+  }
+}
+
+async function showSchemaProposalDiff(schemaDocument: vscode.TextDocument, proposal: SchemaUpdateProposal) {
+  const preview = await vscode.workspace.openTextDocument({
+    content: proposal.updatedSchema,
+    language: schemaDocument.languageId || 'json'
+  });
+  const title = `${getDocumentName(schemaDocument)} ↔ ${proposal.title}`;
+  await vscode.commands.executeCommand('vscode.diff', schemaDocument.uri, preview.uri, title);
+}
+
+async function applySchemaProposal(
+  sampleDocument: vscode.TextDocument,
+  schemaDocument: vscode.TextDocument,
+  proposal: SchemaUpdateProposal
+): Promise<void> {
+  try {
+    JSON.parse(proposal.updatedSchema);
+  } catch (error) {
+    void vscode.window.showErrorMessage(`Schema proposal is not valid JSON: ${String(error)}`);
+    return;
+  }
+
+  const edit = new vscode.WorkspaceEdit();
+  const fullRange = new vscode.Range(
+    schemaDocument.positionAt(0),
+    schemaDocument.positionAt(schemaDocument.getText().length)
+  );
+  edit.replace(schemaDocument.uri, fullRange, proposal.updatedSchema);
+  const applied = await vscode.workspace.applyEdit(edit);
+  if (!applied) {
+    void vscode.window.showErrorMessage('Failed to apply schema proposal.');
+    return;
+  }
+
+  const config = vscode.workspace.getConfiguration('jsonAtlas', schemaDocument.uri);
+  if (config.get<boolean>('autoSaveOnEdit')) {
+    await schemaDocument.save();
+  }
+
+  void vscode.window.showInformationMessage(`Applied schema proposal "${proposal.title}".`);
+  log(`Applied schema proposal "${proposal.title}" to ${getDocumentName(schemaDocument)}.`);
+  await refreshDiagnostics(sampleDocument);
 }
 
 function shouldAutoGenerateSummary() {

@@ -15,6 +15,7 @@ JSON Atlas keeps your JSON documents healthy by surfacing syntax errors in-line,
 - **Draggable layout** in Graph mode so you can rearrange nodes to highlight the relationships you care about; per-document positions persist between renders.
 - **Instant search & pan**: use the visualizer “Find” box to jump to any key/value (including array items) and automatically center the corresponding node.
 - **Built-in AI assistant**: chat with your JSON, stream responses, and apply suggested edits directly from the webview once you provide an API key.
+- **AI schema proposals**: run `JSON Atlas: Generate AI Schema Updates` to have the AI inspect the active document plus its schema, propose changes (new enums/constraints), review diffs, and apply updates safely.
 - **Command palette & editor title entry** to trigger the visualization beside the active editor.
 
 ## Usage

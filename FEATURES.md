@@ -12,7 +12,7 @@
 - Offer autocomplete items for properties/enums that include schema descriptions and defaults.
 - Provide snippets that insert the full required property set for an object according to the schema.
 
-## 4. AI-Assisted Schema Updates ⏳ Incomplete
+## 4. AI-Assisted Schema Updates ✅ Completed
 - Have the AI analyze existing JSON payloads and propose schema changes (new enums, oneOf branches, etc.).
 - Present proposals in a diff/review UI before applying them to the schema file.
 

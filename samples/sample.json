@@ -31,12 +31,14 @@
         {
             "type": "latency",
             "thresholdMs": 350,
-            "channels": ["pager", "slack"]
+            "channels": ["pager", "slack"],
+            "description": "Alert when latency exceeds 350ms"
         },
         {
             "type": "errorRate",
             "thresholdPercent": 1.5,
-            "channels": ["email"]
+            "channels": ["email"],
+            "description": "Alert when error rate exceeds 1.5%"
         }
     ],
     "lastDeployment": "2024-11-07T15:23:10Z"

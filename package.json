@@ -36,7 +36,8 @@
         "onCommand:jsonAtlas.showVisualizer",
         "onCommand:jsonAtlas.openVisualizerPanel",
         "onCommand:jsonAtlas.explainSelection",
-        "onCommand:jsonAtlas.generateEditProposals"
+        "onCommand:jsonAtlas.generateEditProposals",
+        "onCommand:jsonAtlas.generateSchemaUpdates"
     ],
     "contributes": {
         "commands": [
@@ -72,6 +73,11 @@
             {
                 "command": "jsonAtlas.generateEditProposals",
                 "title": "JSON Atlas: Generate AI Edit Proposals",
+                "category": "JSON Atlas"
+            },
+            {
+                "command": "jsonAtlas.generateSchemaUpdates",
+                "title": "JSON Atlas: Generate AI Schema Updates",
                 "category": "JSON Atlas"
             },
             {

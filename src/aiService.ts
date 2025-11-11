@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { CoreMessage, LanguageModel, streamText } from 'ai';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createAnthropic } from '@ai-sdk/anthropic';
+import { SchemaInfo } from './schemaValidator';
 
 const MODEL_STORAGE_KEY = 'jsonAtlas.aiModel';
 const DEFAULT_MODEL = 'gpt-4o-mini';
@@ -103,6 +104,12 @@ export interface EditProposal {
   title: string;
   summary: string;
   updatedJson: string;
+}
+
+export interface SchemaUpdateProposal {
+  title: string;
+  summary: string;
+  updatedSchema: string;
 }
 
 export class AiService {
@@ -291,6 +298,56 @@ export class AiService {
     return this.parseEditProposals(raw);
   }
 
+  public async generateSchemaProposals(
+    document: vscode.TextDocument,
+    schemaInfo: SchemaInfo,
+    signal?: AbortSignal
+  ): Promise<SchemaUpdateProposal[]> {
+    const model = this.getSelectedModelOption();
+    const apiKey = await this.ensureProviderKey(model.provider);
+    if (!apiKey) {
+      return [];
+    }
+
+    const client = PROVIDER_CONFIG[model.provider].createClient(apiKey);
+    const sampleJson = truncate(document.getText(), Math.floor(MAX_CONTEXT_CHARS / 2));
+    const schemaText = truncate(schemaInfo.schemaText, Math.floor(MAX_CONTEXT_CHARS / 2));
+
+    const result = await streamText({
+      model: client(model.id),
+      temperature: 0.2,
+      abortSignal: signal,
+      messages: [
+        {
+          role: 'system',
+          content: [
+            'You are an expert JSON Schema engineer.',
+            'Given the current schema and representative JSON documents, propose targeted schema updates.',
+            'Respond with strict JSON matching this shape:',
+            '{"proposals":[{"title":"string","summary":"string","updatedSchema":"string"}]}',
+            'The updatedSchema must contain the complete schema after applying the change. Preserve formatting where practical.'
+          ].join(' ')
+        },
+        {
+          role: 'user',
+          content: [
+            `Existing schema (from ${schemaInfo.uri.fsPath}):`,
+            schemaText,
+            '',
+            `Sample JSON document (${document.uri.fsPath}):`,
+            sampleJson,
+            '',
+            'Suggest up to 3 improvements (new enums, required props, oneOf branches, constraints).',
+            'Only propose meaningful updates that keep the schema valid and backwards compatible where possible.'
+          ].join('\n')
+        }
+      ]
+    });
+
+    const raw = await result.text;
+    return this.parseSchemaProposals(raw);
+  }
+
   public async streamChat(options: {
     document: vscode.TextDocument;
     history: CoreMessage[];
@@ -404,6 +461,38 @@ export class AiService {
         return { title, summary, updatedJson } satisfies EditProposal;
       })
       .filter((proposal): proposal is EditProposal => Boolean(proposal));
+  }
+
+  private parseSchemaProposals(raw: string): SchemaUpdateProposal[] {
+    const payload = this.extractJson(raw);
+    if (!payload) {
+      return [];
+    }
+
+    const rawProposals = Array.isArray(payload?.proposals)
+      ? payload.proposals
+      : Array.isArray(payload)
+        ? payload
+        : [];
+
+    return (rawProposals as Array<Record<string, unknown>>)
+      .map((entry, index) => {
+        if (!entry) {
+          return undefined;
+        }
+        const record = entry as { [key: string]: unknown };
+        const rawTitle = record.title;
+        const rawSummary = record.summary ?? record.reason;
+        const rawSchema = record.updatedSchema ?? record.schema ?? record.output;
+        const title = typeof rawTitle === 'string' && rawTitle.trim().length ? rawTitle.trim() : `Schema Proposal ${index + 1}`;
+        const summary = typeof rawSummary === 'string' ? rawSummary.trim() : '';
+        const updatedSchema = typeof rawSchema === 'string' ? rawSchema.trim() : '';
+        if (!updatedSchema) {
+          return undefined;
+        }
+        return { title, summary, updatedSchema } satisfies SchemaUpdateProposal;
+      })
+      .filter((proposal): proposal is SchemaUpdateProposal => Boolean(proposal));
   }
 
   private extractJson(raw: string): any {
