@@ -34,7 +34,7 @@ export interface SchemaNavigationTarget {
 
 type JsonPath = (string | number)[];
 
-interface SchemaResolution {
+export interface SchemaResolution {
   schema: unknown;
   pointer: string;
 }
@@ -277,6 +277,14 @@ export class SchemaValidator {
 
   public getSchemaInsights(documentUri: vscode.Uri): SchemaInsight[] {
     return this.schemaInsightsByDocument.get(documentUri.toString()) ?? [];
+  }
+
+  public resolveSchemaForJsonPath(documentUri: vscode.Uri, path: JsonPath | undefined): SchemaResolution | undefined {
+    const info = this.schemaInfoByDocument.get(documentUri.toString());
+    if (!info) {
+      return undefined;
+    }
+    return this.resolveSchemaForPath(info, path);
   }
 
   private buildInsightsFromErrors(errors: ErrorObject[]): SchemaInsight[] {

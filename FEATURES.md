@@ -8,7 +8,7 @@
 - Introduce a panel that lists missing required props, type mismatches, and deprecated fields discovered during validation.
 - Clicking an entry should focus either the visualizer node or the editor range.
 
-## 3. Schema-Driven Snippets & Completion ⏳ Incomplete
+## 3. Schema-Driven Snippets & Completion ✅ Completed
 - Offer autocomplete items for properties/enums that include schema descriptions and defaults.
 - Provide snippets that insert the full required property set for an object according to the schema.
 

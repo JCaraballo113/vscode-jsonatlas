@@ -142,6 +142,11 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.window.registerWebviewViewProvider(SummaryViewProvider.viewId, summaryViewProvider),
     schemaInsightsProvider,
     vscode.window.registerWebviewViewProvider(SchemaInsightsViewProvider.viewId, schemaInsightsProvider),
+    vscode.languages.registerCompletionItemProvider(Array.from(SUPPORTED_LANGUAGES), {
+      provideCompletionItems(document, position, token, context) {
+        return provideSchemaCompletionItems(document, position, context);
+      }
+    }, '"', ':', ',', '{'),
     vscode.languages.registerHoverProvider(Array.from(SUPPORTED_LANGUAGES), {
       provideHover(document, position) {
         return provideSchemaHover(document, position);
@@ -814,6 +819,77 @@ function getDocumentName(document: vscode.TextDocument): string {
   return document.uri.fsPath.split(/[\\/]/).pop() ?? document.uri.path;
 }
 
+async function provideSchemaCompletionItems(
+  document: vscode.TextDocument,
+  position: vscode.Position,
+  _context: vscode.CompletionContext
+): Promise<vscode.CompletionItem[] | undefined> {
+  if (!isLintableDocument(document) || !isSchemaValidationEnabled(document)) {
+    logSchemaCompletion(document, 'Document is not lintable or schema validation disabled.');
+    return undefined;
+  }
+
+  const analysis = getOrComputeAnalysis(document);
+  if (!analysis?.root) {
+    logSchemaCompletion(document, 'Document failed to parse; no completion data.');
+    return undefined;
+  }
+
+  const ready = await ensureSchemaNavigationData(document);
+  if (!ready) {
+    logSchemaCompletion(document, 'Schema navigation data unavailable (validation disabled or schema missing).');
+    return undefined;
+  }
+
+  const offset = document.offsetAt(position);
+  const location = getLocation(document.getText(), offset);
+  if (!location) {
+    logSchemaCompletion(document, 'Unable to determine JSON path for cursor.');
+    return undefined;
+  }
+
+  const path = Array.isArray(location.path) ? (location.path as JsonPath).slice() : [];
+  const nodeAtOffset = findNodeAtOffset(analysis.root, offset, true);
+  const propertyRange =
+    location.isAtPropertyKey && nodeAtOffset && nodeAtOffset.type === 'string'
+      ? getStringContentRange(nodeAtOffset, document)
+      : undefined;
+  const isStringValueNode = !location.isAtPropertyKey && nodeAtOffset?.type === 'string';
+  const valueRange =
+    !location.isAtPropertyKey && nodeAtOffset
+      ? isStringValueNode
+        ? getStringContentRange(nodeAtOffset, document)
+        : new vscode.Range(document.positionAt(nodeAtOffset.offset), document.positionAt(nodeAtOffset.offset + nodeAtOffset.length))
+      : undefined;
+
+  const completions: vscode.CompletionItem[] = [];
+
+  if (location.isAtPropertyKey) {
+    const objectPath = path.slice(0, -1) as JsonPath;
+    completions.push(...buildSchemaPropertyCompletions(document, analysis.root, objectPath, propertyRange));
+    const requiredSnippet = buildRequiredPropertiesSnippet(document, analysis.root, objectPath, propertyRange, position);
+    if (requiredSnippet) {
+      completions.push(requiredSnippet);
+    }
+  } else {
+    completions.push(...buildEnumValueCompletions(document, path, valueRange, { withinStringLiteral: isStringValueNode }));
+  }
+
+  if (!completions.length) {
+    logSchemaCompletion(
+      document,
+      `No schema completions for path ${formatJsonPath(path)} (isAtPropertyKey=${Boolean(location.isAtPropertyKey)})`
+    );
+  } else {
+    logSchemaCompletion(
+      document,
+      `Provided ${completions.length} schema completions for ${location.isAtPropertyKey ? 'property' : 'value'} path ${formatJsonPath(path)}`
+    );
+  }
+
+  return completions.length ? completions : undefined;
+}
+
 async function provideSchemaHover(document: vscode.TextDocument, position: vscode.Position): Promise<vscode.Hover | undefined> {
   if (!isLintableDocument(document) || !isSchemaValidationEnabled(document)) {
     return undefined;
@@ -1082,11 +1158,468 @@ function buildSchemaCodeLenses(
   return lenses;
 }
 
+function buildSchemaPropertyCompletions(
+  document: vscode.TextDocument,
+  root: Node | undefined,
+  objectPath: JsonPath,
+  replaceRange?: vscode.Range
+): vscode.CompletionItem[] {
+  if (!root) {
+    return [];
+  }
+
+  const resolution = schemaValidator.resolveSchemaForJsonPath(document.uri, objectPath);
+  if (!resolution || !isPlainObject(resolution.schema)) {
+    return [];
+  }
+
+  const properties = collectSchemaPropertyEntries(resolution.schema);
+  if (!properties.length) {
+    return [];
+  }
+
+  const objectNode = findNodeAtLocation(root, objectPath);
+  const existingKeys = collectObjectPropertyKeys(objectNode);
+  const requiredSet = new Set(collectRequiredProperties(resolution.schema));
+  const completions: vscode.CompletionItem[] = [];
+
+  for (const entry of properties) {
+    const propertyPath = objectPath.concat([entry.name]);
+    const resolved = schemaValidator.resolveSchemaForJsonPath(document.uri, propertyPath);
+    const propertySchema = resolved?.schema ?? entry.schema;
+    const description = readSchemaDescription(propertySchema);
+    const defaultValue = readSchemaDefault(propertySchema);
+    const pointer = resolved?.pointer;
+    const typeLabel = getPrimarySchemaType(propertySchema);
+    const item = new vscode.CompletionItem(entry.name, vscode.CompletionItemKind.Property);
+    if (replaceRange) {
+      item.range = replaceRange;
+      item.insertText = entry.name;
+    } else {
+      item.insertText = `"${entry.name}"`;
+    }
+    const detailParts: string[] = [];
+    if (requiredSet.has(entry.name)) {
+      detailParts.push('required');
+    }
+    if (typeLabel) {
+      detailParts.push(typeLabel);
+    }
+    if (typeof defaultValue !== 'undefined') {
+      detailParts.push(`default: ${formatDefaultPreview(defaultValue)}`);
+    }
+    if (existingKeys.has(entry.name)) {
+      detailParts.push('already set');
+    }
+    if (detailParts.length) {
+      item.detail = detailParts.join(' · ');
+    }
+    const markdown = buildPropertyCompletionMarkdown(description, defaultValue, pointer);
+    if (markdown) {
+      item.documentation = markdown;
+    }
+    item.sortText = `${requiredSet.has(entry.name) ? '1' : '2'}_${entry.name}`;
+    completions.push(item);
+  }
+
+  return completions;
+}
+
+interface EnumCompletionOptions {
+  withinStringLiteral?: boolean;
+}
+
+function buildEnumValueCompletions(
+  document: vscode.TextDocument,
+  path: JsonPath,
+  replaceRange?: vscode.Range,
+  options?: EnumCompletionOptions
+): vscode.CompletionItem[] {
+  const resolution = schemaValidator.resolveSchemaForJsonPath(document.uri, path);
+  if (!resolution) {
+    return [];
+  }
+
+  const enumValues = readEnumValues(resolution.schema);
+  if (!enumValues?.length) {
+    return [];
+  }
+
+  const description = readSchemaDescription(resolution.schema);
+  const defaultValue = readSchemaDefault(resolution.schema);
+  const completions: vscode.CompletionItem[] = [];
+
+  enumValues.forEach((value, index) => {
+    const label = typeof value === 'string' ? value : formatDefaultPreview(value);
+    const item = new vscode.CompletionItem(label, vscode.CompletionItemKind.Value);
+    const insertText = formatJsonValue(value);
+    if (options?.withinStringLiteral && typeof value === 'string') {
+      item.insertText = value;
+    } else {
+      item.insertText = insertText;
+    }
+    if (replaceRange) {
+      item.range = replaceRange;
+    }
+    const detailParts: string[] = ['enum value'];
+    const typeLabel = typeof value;
+    if (typeLabel !== 'undefined' && typeLabel !== 'object') {
+      detailParts.push(typeLabel);
+    } else if (Array.isArray(value)) {
+      detailParts.push('array');
+    } else if (value === null) {
+      detailParts.push('null');
+    } else if (value && typeof value === 'object') {
+      detailParts.push('object');
+    }
+    if (typeof defaultValue !== 'undefined' && valuesEqual(defaultValue, value)) {
+      detailParts.push('default');
+    }
+    item.detail = detailParts.join(' · ');
+    const markdown = buildEnumCompletionMarkdown(description, value, resolution.pointer, defaultValue);
+    if (markdown) {
+      item.documentation = markdown;
+    }
+    item.sortText = `3_${index.toString().padStart(2, '0')}`;
+    completions.push(item);
+  });
+
+  return completions;
+}
+
+function buildRequiredPropertiesSnippet(
+  document: vscode.TextDocument,
+  root: Node | undefined,
+  objectPath: JsonPath,
+  replaceRange: vscode.Range | undefined,
+  position: vscode.Position
+): vscode.CompletionItem | undefined {
+  if (!root) {
+    return undefined;
+  }
+  const resolution = schemaValidator.resolveSchemaForJsonPath(document.uri, objectPath);
+  if (!resolution || !isPlainObject(resolution.schema)) {
+    return undefined;
+  }
+  const required = collectRequiredProperties(resolution.schema);
+  if (!required.length) {
+    return undefined;
+  }
+  const objectNode = findNodeAtLocation(root, objectPath);
+  const existingKeys = collectObjectPropertyKeys(objectNode);
+  const missing = required.filter((name) => !existingKeys.has(name));
+  if (!missing.length) {
+    return undefined;
+  }
+
+  const lineIndent = getLineIndentation(document, position);
+  const snippet = new vscode.SnippetString();
+  missing.forEach((name, index) => {
+    if (index > 0) {
+      snippet.appendText(',\n');
+    }
+    snippet.appendText(`${lineIndent}"${name}": `);
+    appendValueSnippetForSchema(snippet, document.uri, objectPath.concat([name]));
+  });
+
+  const item = new vscode.CompletionItem('Insert required properties', vscode.CompletionItemKind.Snippet);
+  item.insertText = snippet;
+  if (replaceRange) {
+    item.range = replaceRange;
+  }
+  item.sortText = '0_required';
+  const propertyList = missing.map((name) => `\`${escapeMarkdown(name)}\``).join(', ');
+  item.detail = `JSON Schema · ${missing.length} required ${missing.length === 1 ? 'property' : 'properties'}`;
+  item.documentation = new vscode.MarkdownString(
+    `Adds the missing required properties: ${propertyList}`
+  );
+  return item;
+}
+
+interface SchemaPropertyEntry {
+  name: string;
+  schema: unknown;
+}
+
+function collectSchemaPropertyEntries(schema: unknown): SchemaPropertyEntry[] {
+  if (!isPlainObject(schema)) {
+    return [];
+  }
+  const result = new Map<string, unknown>();
+  const visited = new Set<unknown>();
+  const visit = (candidate: unknown) => {
+    if (!isPlainObject(candidate) || visited.has(candidate)) {
+      return;
+    }
+    visited.add(candidate);
+    const properties = candidate.properties;
+    if (isPlainObject(properties)) {
+      for (const [name, value] of Object.entries(properties)) {
+        if (!result.has(name)) {
+          result.set(name, value);
+        }
+      }
+    }
+    const composites = [candidate.allOf, candidate.anyOf, candidate.oneOf];
+    for (const block of composites) {
+      if (Array.isArray(block)) {
+        block.forEach(visit);
+      }
+    }
+  };
+  visit(schema);
+  return Array.from(result.entries()).map(([name, value]) => ({ name, schema: value }));
+}
+
+function collectRequiredProperties(schema: unknown): string[] {
+  if (!isPlainObject(schema)) {
+    return [];
+  }
+  const required = new Set<string>();
+  const visited = new Set<unknown>();
+  const visit = (candidate: unknown) => {
+    if (!isPlainObject(candidate) || visited.has(candidate)) {
+      return;
+    }
+    visited.add(candidate);
+    if (Array.isArray(candidate.required)) {
+      for (const prop of candidate.required) {
+        if (typeof prop === 'string') {
+          required.add(prop);
+        }
+      }
+    }
+    if (Array.isArray(candidate.allOf)) {
+      candidate.allOf.forEach(visit);
+    }
+  };
+  visit(schema);
+  return Array.from(required.values());
+}
+
+function collectObjectPropertyKeys(node: Node | undefined): Set<string> {
+  const keys = new Set<string>();
+  if (!node || node.type !== 'object') {
+    return keys;
+  }
+  for (const property of node.children ?? []) {
+    if (property.type !== 'property' || !property.children || property.children.length < 2) {
+      continue;
+    }
+    const keyNode = property.children[0];
+    const key = extractPropertyKey(keyNode);
+    if (typeof key !== 'undefined') {
+      keys.add(key);
+    }
+  }
+  return keys;
+}
+
+function getLineIndentation(document: vscode.TextDocument, position: vscode.Position): string {
+  const line = document.lineAt(position.line);
+  const match = line.text.match(/^\s*/);
+  return match ? match[0] : '';
+}
+
+function appendValueSnippetForSchema(snippet: vscode.SnippetString, uri: vscode.Uri, path: JsonPath) {
+  const resolved = schemaValidator.resolveSchemaForJsonPath(uri, path);
+  const schema = resolved?.schema;
+  const defaultValue = readSchemaDefault(schema);
+  if (typeof defaultValue !== 'undefined') {
+    snippet.appendText(formatJsonValue(defaultValue));
+    return;
+  }
+  const type = getPrimarySchemaType(schema);
+  if (type === 'string') {
+    snippet.appendText('"');
+    snippet.appendPlaceholder('value');
+    snippet.appendText('"');
+    return;
+  }
+  if (type === 'number' || type === 'integer') {
+    snippet.appendPlaceholder('0');
+    return;
+  }
+  if (type === 'boolean') {
+    snippet.appendChoice(['true', 'false']);
+    return;
+  }
+  if (type === 'array') {
+    snippet.appendText('[');
+    snippet.appendPlaceholder('items');
+    snippet.appendText(']');
+    return;
+  }
+  if (type === 'object') {
+    snippet.appendText('{ ');
+    snippet.appendPlaceholder('…');
+    snippet.appendText(' }');
+    return;
+  }
+  snippet.appendPlaceholder('value');
+}
+
+function readSchemaDescription(schema: unknown): string | undefined {
+  if (!isPlainObject(schema)) {
+    return undefined;
+  }
+  const description = schema.description;
+  return typeof description === 'string' ? description : undefined;
+}
+
+function readSchemaDefault(schema: unknown): unknown {
+  if (!isPlainObject(schema)) {
+    return undefined;
+  }
+  if (Object.prototype.hasOwnProperty.call(schema, 'default')) {
+    return schema.default;
+  }
+  return undefined;
+}
+
+function getPrimarySchemaType(schema: unknown): string | undefined {
+  if (!isPlainObject(schema)) {
+    return undefined;
+  }
+  const typeValue = schema.type;
+  if (typeof typeValue === 'string') {
+    return typeValue;
+  }
+  if (Array.isArray(typeValue)) {
+    const first = typeValue.find((value) => typeof value === 'string');
+    return typeof first === 'string' ? first : undefined;
+  }
+  if (readEnumValues(schema)?.length) {
+    const sample = readEnumValues(schema) ?? [];
+    const firstValue = sample.find((value) => value !== undefined);
+    if (typeof firstValue === 'string') {
+      return 'string';
+    }
+    if (typeof firstValue === 'number') {
+      return 'number';
+    }
+    if (typeof firstValue === 'boolean') {
+      return 'boolean';
+    }
+  }
+  return undefined;
+}
+
+function formatDefaultPreview(value: unknown): string {
+  const raw = formatJsonValue(value).replace(/\s+/g, ' ').trim();
+  return truncate(raw, 40);
+}
+
+function formatJsonValue(value: unknown): string {
+  if (typeof value === 'string') {
+    return JSON.stringify(value);
+  }
+  try {
+    return JSON.stringify(value, null, 2) ?? 'null';
+  } catch {
+    return String(value);
+  }
+}
+
+function buildPropertyCompletionMarkdown(
+  description: string | undefined,
+  defaultValue: unknown,
+  pointer?: string
+): vscode.MarkdownString | undefined {
+  if (!description && typeof defaultValue === 'undefined' && !pointer) {
+    return undefined;
+  }
+  const markdown = new vscode.MarkdownString(undefined, true);
+  if (description) {
+    markdown.appendMarkdown(`${escapeMarkdown(description)}\n\n`);
+  }
+  if (typeof defaultValue !== 'undefined') {
+    markdown.appendMarkdown(`Default: ${formatValueForMarkdown(formatJsonValue(defaultValue))}\n\n`);
+  }
+  if (pointer) {
+    markdown.appendMarkdown(`Schema pointer: \`${escapeMarkdown(pointer)}\``);
+  }
+  return markdown;
+}
+
+function buildEnumCompletionMarkdown(
+  description: string | undefined,
+  value: unknown,
+  pointer: string | undefined,
+  defaultValue: unknown
+): vscode.MarkdownString | undefined {
+  const pieces: string[] = [];
+  if (description) {
+    pieces.push(escapeMarkdown(description));
+  }
+  const valueText = formatJsonValue(value);
+  pieces.push(`Value: ${formatValueForMarkdown(valueText)}`);
+  if (typeof defaultValue !== 'undefined' && valuesEqual(defaultValue, value)) {
+    pieces.push('Matches the schema default.');
+  }
+  if (pointer) {
+    pieces.push(`Pointer: \`${escapeMarkdown(pointer)}\``);
+  }
+  if (!pieces.length) {
+    return undefined;
+  }
+  const markdown = new vscode.MarkdownString(undefined, true);
+  markdown.appendMarkdown(pieces.join('\n\n'));
+  return markdown;
+}
+
+function formatValueForMarkdown(value: string): string {
+  if (value.includes('\n')) {
+    return `\n\n\`\`\`json\n${value}\n\`\`\``;
+  }
+  return `\`${escapeMarkdown(value)}\``;
+}
+
+function readEnumValues(schema: unknown): unknown[] | undefined {
+  if (!isPlainObject(schema)) {
+    return undefined;
+  }
+  if (Array.isArray(schema.enum)) {
+    return schema.enum;
+  }
+  if (Object.prototype.hasOwnProperty.call(schema, 'const')) {
+    return [schema.const];
+  }
+  return undefined;
+}
+
+function valuesEqual(a: unknown, b: unknown): boolean {
+  try {
+    return JSON.stringify(a) === JSON.stringify(b);
+  } catch {
+    return a === b;
+  }
+}
+
+function isPlainObject(value: unknown): value is Record<string, any> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function getStringContentRange(node: Node, document: vscode.TextDocument): vscode.Range {
+  if (node.type !== 'string') {
+    return new vscode.Range(document.positionAt(node.offset), document.positionAt(node.offset + node.length));
+  }
+  const startOffset = node.length >= 1 ? node.offset + 1 : node.offset;
+  const endOffset = node.length >= 2 ? node.offset + node.length - 1 : node.offset + node.length;
+  const start = document.positionAt(startOffset);
+  const end = document.positionAt(Math.max(endOffset, startOffset));
+  return new vscode.Range(start, end);
+}
+
 function log(message: string) {
   if (!outputChannel) {
     return;
   }
   outputChannel.appendLine(`[${new Date().toISOString()}] ${message}`);
+}
+
+function logSchemaCompletion(document: vscode.TextDocument, message: string) {
+  log(`[completion:${getDocumentName(document)}] ${message}`);
 }
 
 function truncate(value: string, limit: number): string {
