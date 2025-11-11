@@ -1,8 +1,16 @@
 **/.git
 **/.DS_Store
+.vscode/**
+.vscode-test/**
 src/**
+webview/src/**
+samples/**
+test-webview.html
 tsconfig.json
+tsconfig.webview.json
+vite.config.ts
 .vscodeignore
 .gitignore
-README.md
+package-lock.json
 node_modules/@types/**
+!README.md
