@@ -11,6 +11,23 @@ export interface SchemaInfo {
   schema: unknown;
   schemaText: string;
   root: Node | undefined;
+  pointerIndex: Map<string, Node>;
+}
+
+export interface SchemaNavigationTarget {
+  pointer: string;
+  uri: vscode.Uri;
+  offset?: number;
+  length?: number;
+  title?: string;
+  description?: string;
+}
+
+type JsonPath = (string | number)[];
+
+interface SchemaResolution {
+  schema: unknown;
+  pointer: string;
 }
 
 export class SchemaValidator {
@@ -23,6 +40,7 @@ export class SchemaValidator {
   public reset() {
     this.validatorCache.clear();
     this.warnedMessages.clear();
+    this.schemaInfoByDocument.clear();
   }
 
   public async validate(document: vscode.TextDocument, root: Node | undefined, data: unknown): Promise<vscode.Diagnostic[]> {
@@ -55,7 +73,8 @@ export class SchemaValidator {
       uri: schemaUri,
       schema: schemaContainer.schema,
       schemaText: schemaContainer.text,
-      root: schemaRoot
+      root: schemaRoot,
+      pointerIndex: this.buildPointerIndex(schemaRoot)
     });
 
     const validator = this.getValidator(schemaUri.toString(), schemaContainer);
@@ -180,7 +199,300 @@ export class SchemaValidator {
     void vscode.window.showWarningMessage(message);
   }
 
+  public resolveNavigationTarget(documentUri: vscode.Uri, path: JsonPath): SchemaNavigationTarget | undefined {
+    const info = this.schemaInfoByDocument.get(documentUri.toString());
+    if (!info) {
+      return undefined;
+    }
+
+    const resolution = this.resolveSchemaForPath(info, path);
+    if (!resolution) {
+      return undefined;
+    }
+
+    const node = info.pointerIndex.get(resolution.pointer);
+    return {
+      pointer: resolution.pointer,
+      uri: info.uri,
+      offset: node?.offset,
+      length: node?.length,
+      title: this.tryReadString(resolution.schema, 'title'),
+      description: this.tryReadString(resolution.schema, 'description')
+    };
+  }
+
   public getSchemaInfo(documentUri: vscode.Uri): SchemaInfo | undefined {
     return this.schemaInfoByDocument.get(documentUri.toString());
+  }
+
+  private resolveSchemaForPath(info: SchemaInfo, path: JsonPath | undefined): SchemaResolution | undefined {
+    const normalizedPath = Array.isArray(path) ? path : [];
+    let state = this.dereferenceSchema(info.schema, '#', info);
+
+    if (!normalizedPath.length) {
+      return state;
+    }
+
+    for (const segment of normalizedPath) {
+      const next =
+        typeof segment === 'number'
+          ? this.resolveArraySchema(state.schema, state.pointer, segment, info)
+          : this.resolvePropertySchema(state.schema, state.pointer, String(segment), info);
+      if (!next) {
+        return undefined;
+      }
+      state = this.dereferenceSchema(next.schema, next.pointer, info);
+    }
+
+    return state;
+  }
+
+  private resolvePropertySchema(schema: unknown, pointer: string, key: string, info: SchemaInfo): SchemaResolution | undefined {
+    if (typeof schema === 'boolean') {
+      return { schema, pointer };
+    }
+    if (!this.isRecord(schema)) {
+      return undefined;
+    }
+
+    const properties = schema.properties;
+    if (this.isRecord(properties) && Object.prototype.hasOwnProperty.call(properties, key)) {
+      return { schema: properties[key], pointer: this.joinPointer(pointer, 'properties', key) };
+    }
+
+    const patternProperties = schema.patternProperties;
+    if (this.isRecord(patternProperties)) {
+      for (const pattern of Object.keys(patternProperties)) {
+        try {
+          const regex = new RegExp(pattern);
+          if (regex.test(key)) {
+            return { schema: patternProperties[pattern], pointer: this.joinPointer(pointer, 'patternProperties', pattern) };
+          }
+        } catch {
+          // ignore invalid regex
+        }
+      }
+    }
+
+    if (this.isSchemaLike(schema.additionalProperties)) {
+      return { schema: schema.additionalProperties, pointer: this.joinPointer(pointer, 'additionalProperties') };
+    }
+
+    if (this.isSchemaLike(schema.unevaluatedProperties)) {
+      return { schema: schema.unevaluatedProperties, pointer: this.joinPointer(pointer, 'unevaluatedProperties') };
+    }
+
+    return this.resolveFromCompositeSchemas(schema, pointer, (candidate, candidatePointer) =>
+      this.resolvePropertySchema(candidate, candidatePointer, key, info)
+    );
+  }
+
+  private resolveArraySchema(schema: unknown, pointer: string, index: number, info: SchemaInfo): SchemaResolution | undefined {
+    if (typeof schema === 'boolean') {
+      return { schema, pointer };
+    }
+    if (!this.isRecord(schema)) {
+      return undefined;
+    }
+
+    if (Array.isArray(schema.prefixItems) && index < schema.prefixItems.length) {
+      return { schema: schema.prefixItems[index], pointer: this.joinPointer(pointer, 'prefixItems', index.toString()) };
+    }
+
+    if (Array.isArray(schema.items)) {
+      if (index < schema.items.length) {
+        return { schema: schema.items[index], pointer: this.joinPointer(pointer, 'items', index.toString()) };
+      }
+    } else if (this.isSchemaLike(schema.items)) {
+      return { schema: schema.items, pointer: this.joinPointer(pointer, 'items') };
+    }
+
+    if (this.isSchemaLike(schema.contains)) {
+      return { schema: schema.contains, pointer: this.joinPointer(pointer, 'contains') };
+    }
+
+    if (this.isSchemaLike(schema.additionalItems)) {
+      return { schema: schema.additionalItems, pointer: this.joinPointer(pointer, 'additionalItems') };
+    }
+
+    if (this.isSchemaLike(schema.unevaluatedItems)) {
+      return { schema: schema.unevaluatedItems, pointer: this.joinPointer(pointer, 'unevaluatedItems') };
+    }
+
+    return this.resolveFromCompositeSchemas(schema, pointer, (candidate, candidatePointer) =>
+      this.resolveArraySchema(candidate, candidatePointer, index, info)
+    );
+  }
+
+  private resolveFromCompositeSchemas(
+    schema: Record<string, unknown>,
+    pointer: string,
+    resolver: (schema: unknown, pointer: string) => SchemaResolution | undefined
+  ): SchemaResolution | undefined {
+    const keywords: Array<'allOf' | 'anyOf' | 'oneOf'> = ['allOf', 'anyOf', 'oneOf'];
+    for (const keyword of keywords) {
+      const block = schema[keyword];
+      if (!Array.isArray(block)) {
+        continue;
+      }
+      for (let index = 0; index < block.length; index += 1) {
+        const childPointer = this.joinPointer(pointer, keyword, index.toString());
+        const result = resolver(block[index], childPointer);
+        if (result) {
+          return result;
+        }
+      }
+    }
+
+    const thenSchema = schema.then;
+    if (this.isSchemaLike(thenSchema)) {
+      const match = resolver(thenSchema, this.joinPointer(pointer, 'then'));
+      if (match) {
+        return match;
+      }
+    }
+
+    const elseSchema = schema.else;
+    if (this.isSchemaLike(elseSchema)) {
+      const match = resolver(elseSchema, this.joinPointer(pointer, 'else'));
+      if (match) {
+        return match;
+      }
+    }
+
+    return undefined;
+  }
+
+  private dereferenceSchema(schema: unknown, pointer: string, info: SchemaInfo): SchemaResolution {
+    if (!this.isRecord(schema)) {
+      return { schema, pointer };
+    }
+
+    let currentSchema: unknown = schema;
+    let currentPointer = pointer;
+    const visited = new Set<string>();
+
+    while (this.isRecord(currentSchema) && typeof currentSchema.$ref === 'string') {
+      const ref = currentSchema.$ref;
+      if (!ref.startsWith('#')) {
+        break;
+      }
+      const normalized = ref === '#' ? '#' : ref;
+      if (visited.has(normalized)) {
+        break;
+      }
+      visited.add(normalized);
+      const target = this.getSchemaAtPointer(info.schema, normalized);
+      if (typeof target === 'undefined') {
+        break;
+      }
+      currentSchema = target;
+      currentPointer = normalized;
+    }
+
+    return { schema: currentSchema, pointer: currentPointer };
+  }
+
+  private getSchemaAtPointer(root: unknown, pointer: string): unknown | undefined {
+    const segments = this.pointerToSegments(pointer);
+    if (!segments.length) {
+      return root;
+    }
+    let current: unknown = root;
+    for (const segment of segments) {
+      if (Array.isArray(current)) {
+        const index = Number(segment);
+        if (!Number.isInteger(index) || index < 0 || index >= current.length) {
+          return undefined;
+        }
+        current = current[index];
+        continue;
+      }
+      if (!this.isRecord(current)) {
+        return undefined;
+      }
+      if (!Object.prototype.hasOwnProperty.call(current, segment)) {
+        return undefined;
+      }
+      current = current[segment];
+    }
+    return current;
+  }
+
+  private buildPointerIndex(root: Node | undefined): Map<string, Node> {
+    const index = new Map<string, Node>();
+    if (!root) {
+      return index;
+    }
+
+    const visit = (node: Node, segments: string[]) => {
+      index.set(this.buildPointerFromSegments(segments), node);
+      if (node.type === 'object') {
+        for (const property of node.children ?? []) {
+          if (property.type !== 'property' || !property.children || property.children.length < 2) {
+            continue;
+          }
+          const keyNode = property.children[0];
+          const valueNode = property.children[1];
+          const key = typeof keyNode.value === 'string' ? keyNode.value : String(keyNode.value ?? '');
+          visit(valueNode, segments.concat([key]));
+        }
+        return;
+      }
+      if (node.type === 'array') {
+        (node.children ?? []).forEach((child, index) => {
+          visit(child, segments.concat([index.toString()]));
+        });
+      }
+    };
+
+    visit(root, []);
+    return index;
+  }
+
+  private pointerToSegments(pointer: string): string[] {
+    if (!pointer || pointer === '#') {
+      return [];
+    }
+    const trimmed = pointer.startsWith('#/') ? pointer.slice(2) : pointer.replace(/^#/, '');
+    if (!trimmed) {
+      return [];
+    }
+    return trimmed.split('/').map((segment) => segment.replace(/~1/g, '/').replace(/~0/g, '~'));
+  }
+
+  private buildPointerFromSegments(segments: string[]): string {
+    if (!segments.length) {
+      return '#';
+    }
+    return `#/${segments.map((segment) => this.escapePointerSegment(segment)).join('/')}`;
+  }
+
+  private joinPointer(pointer: string, ...segments: (string | number)[]): string {
+    const base = this.pointerToSegments(pointer);
+    for (const segment of segments) {
+      base.push(String(segment));
+    }
+    return this.buildPointerFromSegments(base);
+  }
+
+  private escapePointerSegment(value: string): string {
+    return value.replace(/~/g, '~0').replace(/\//g, '~1');
+  }
+
+  private isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
+  }
+
+  private isSchemaLike(value: unknown): value is unknown {
+    return typeof value === 'boolean' || this.isRecord(value);
+  }
+
+  private tryReadString(schema: unknown, key: string): string | undefined {
+    if (!this.isRecord(schema)) {
+      return undefined;
+    }
+    const value = schema[key];
+    return typeof value === 'string' ? value : undefined;
   }
 }

@@ -15,12 +15,31 @@ export interface VisualizerSelectionInfo {
     endLine?: number;
 }
 
+export type GraphLayoutPreset = 'compact' | 'balanced' | 'relaxed';
+
+export interface VisualizerSchemaPointerEntry {
+    pointer: string;
+    uri: vscode.Uri;
+    offset?: number;
+    length?: number;
+    title?: string;
+    description?: string;
+}
+
+interface SchemaPointerPreview {
+    pointer: string;
+    title?: string;
+    description?: string;
+}
+
 interface VisualizerUpdateOptions {
     documentUri?: vscode.Uri;
     reveal?: boolean;
     selection?: VisualizerSelectionInfo;
     focusRoot?: boolean;
     resetLayout?: boolean;
+    schemaPointers?: Map<string, VisualizerSchemaPointerEntry> | null;
+    layoutPreset?: GraphLayoutPreset;
 }
 
 // Renders JSON content as a lightweight visualizer inside a VS Code webview.
@@ -32,14 +51,23 @@ export class VisualizerPanel {
     data: unknown,
     documentUri: vscode.Uri,
     aiService: AiService,
-    selection?: VisualizerSelectionInfo
+    selection?: VisualizerSelectionInfo,
+    schemaPointers?: Map<string, VisualizerSchemaPointerEntry>,
+    layoutPreset?: GraphLayoutPreset
   ) {
         if (VisualizerPanel.currentPanel) {
-            VisualizerPanel.currentPanel.update(data, {
+            const updateOptions: VisualizerUpdateOptions = {
                 documentUri,
                 reveal: true,
                 selection,
-            });
+            };
+            if (typeof schemaPointers !== 'undefined') {
+                updateOptions.schemaPointers = schemaPointers;
+            }
+            if (typeof layoutPreset !== 'undefined') {
+                updateOptions.layoutPreset = layoutPreset;
+            }
+            VisualizerPanel.currentPanel.update(data, updateOptions);
             return;
         }
 
@@ -62,7 +90,9 @@ export class VisualizerPanel {
             data,
             documentUri,
             aiService,
-            selection
+            selection,
+            schemaPointers,
+            layoutPreset
         );
     }
 
@@ -73,11 +103,18 @@ export class VisualizerPanel {
         options?: VisualizerUpdateOptions
     ) {
         if (VisualizerPanel.currentPanel?.isForDocument(documentUri)) {
-            VisualizerPanel.currentPanel.update(data, {
+            const nextOptions: VisualizerUpdateOptions = {
                 reveal: false,
                 selection,
                 focusRoot: options?.focusRoot,
-            });
+            };
+            if (options && options.schemaPointers !== undefined) {
+                nextOptions.schemaPointers = options.schemaPointers;
+            }
+            if (options && typeof options.layoutPreset !== 'undefined') {
+                nextOptions.layoutPreset = options.layoutPreset;
+            }
+            VisualizerPanel.currentPanel.update(data, nextOptions);
         }
     }
 
@@ -89,6 +126,16 @@ export class VisualizerPanel {
             return;
         }
         VisualizerPanel.currentPanel.applySelectionUpdate(selection);
+    }
+
+    public static updateSchemaPointers(
+        documentUri: vscode.Uri,
+        pointers?: Map<string, VisualizerSchemaPointerEntry>
+    ) {
+        if (!VisualizerPanel.currentPanel?.isForDocument(documentUri)) {
+            return;
+        }
+        VisualizerPanel.currentPanel.applySchemaPointerUpdate(pointers);
     }
 
     public static focusRoot(documentUri: vscode.Uri) {
@@ -139,6 +186,8 @@ export class VisualizerPanel {
     private documentUri: vscode.Uri;
     private data: unknown;
     private selectionInfo: VisualizerSelectionInfo | undefined;
+    private schemaPointers = new Map<string, VisualizerSchemaPointerEntry>();
+    private graphLayoutPreset: GraphLayoutPreset | undefined;
     private isWebviewReady = false;
     private pendingInvalidMessage: string | undefined;
     private pendingResetView = false;
@@ -154,7 +203,9 @@ export class VisualizerPanel {
         data: unknown,
         documentUri: vscode.Uri,
         aiService: AiService,
-        selection?: VisualizerSelectionInfo
+        selection?: VisualizerSelectionInfo,
+        schemaPointers?: Map<string, VisualizerSchemaPointerEntry>,
+        layoutPreset?: GraphLayoutPreset
     ) {
         this.panel = panel;
         this.extensionUri = extensionUri;
@@ -162,6 +213,10 @@ export class VisualizerPanel {
         this.documentUri = documentUri;
         this.ai = aiService;
         this.selectionInfo = selection;
+        if (schemaPointers) {
+            this.schemaPointers = new Map(schemaPointers);
+        }
+        this.graphLayoutPreset = layoutPreset;
 
         this.disposables.push(
             this.ai.onModelChanged(() => {
@@ -238,6 +293,11 @@ export class VisualizerPanel {
                     void this.applyLineSelection();
                     return;
                 }
+
+                if (message?.type === 'schema:open') {
+                    void this.handleSchemaNavigationRequest(message.payload);
+                    return;
+                }
             },
             null,
             this.disposables
@@ -259,6 +319,12 @@ export class VisualizerPanel {
         }
         if (options.resetLayout) {
             this.pendingResetLayout = true;
+        }
+        if (options.schemaPointers !== undefined) {
+            this.applySchemaPointerUpdate(options.schemaPointers ?? undefined);
+        }
+        if (typeof options.layoutPreset !== 'undefined') {
+            this.graphLayoutPreset = options.layoutPreset;
         }
 
         if (options.documentUri) {
@@ -311,6 +377,9 @@ export class VisualizerPanel {
                 resetView: this.consumeResetViewFlag(),
                 focusRoot: this.consumeFocusRootFlag(),
                 resetLayout: this.consumeResetLayoutFlag(),
+                schemaPointers: this.serializeSchemaPointers(),
+                graphLayoutPreset:
+                    this.graphLayoutPreset ?? this.getPreferredLayoutPreset(),
             },
         });
         this.postChatHistory();
@@ -363,6 +432,40 @@ export class VisualizerPanel {
         });
     }
 
+    private applySchemaPointerUpdate(pointers?: Map<string, VisualizerSchemaPointerEntry>) {
+        if (pointers) {
+            this.schemaPointers = new Map(pointers);
+        } else {
+            this.schemaPointers.clear();
+        }
+        this.postSchemaPointers();
+    }
+
+    private postSchemaPointers() {
+        if (!this.isWebviewReady) {
+            return;
+        }
+        this.panel.webview.postMessage({
+            type: 'schema:pointers',
+            payload: this.serializeSchemaPointers(),
+        });
+    }
+
+    private serializeSchemaPointers(): Record<string, SchemaPointerPreview> | undefined {
+        if (!this.schemaPointers.size) {
+            return undefined;
+        }
+        const payload: Record<string, SchemaPointerPreview> = {};
+        for (const [path, entry] of this.schemaPointers) {
+            payload[path] = {
+                pointer: entry.pointer,
+                title: entry.title,
+                description: entry.description,
+            };
+        }
+        return payload;
+    }
+
     private triggerFocusRoot() {
         this.pendingResetView = true;
         this.pendingFocusRoot = true;
@@ -397,6 +500,37 @@ export class VisualizerPanel {
             type: 'chat:aiStatus',
             payload: { hasKey, provider: selected.provider },
         });
+    }
+
+    private async handleSchemaNavigationRequest(payload: unknown) {
+        const path =
+            payload && typeof payload === 'object' && typeof (payload as { path?: string }).path === 'string'
+                ? (payload as { path: string }).path
+                : undefined;
+        if (!path) {
+            return;
+        }
+
+        const entry = this.schemaPointers.get(path);
+        if (!entry) {
+            void vscode.window.showWarningMessage('Schema definition not found for the selected node.');
+            return;
+        }
+
+        try {
+            const document = await vscode.workspace.openTextDocument(entry.uri);
+            const editor = await vscode.window.showTextDocument(document, { preview: true });
+            const offset = typeof entry.offset === 'number' ? entry.offset : 0;
+            const length = typeof entry.length === 'number' ? entry.length : 0;
+            const start = document.positionAt(offset);
+            const end = length > 0 ? document.positionAt(offset + length) : start;
+            const range = new vscode.Range(start, end);
+            editor.selection = new vscode.Selection(range.start, range.end);
+            editor.revealRange(range, vscode.TextEditorRevealType.InCenter);
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            void vscode.window.showErrorMessage(`Failed to open schema definition: ${message}`);
+        }
     }
 
     private postChatModelConfig() {
@@ -1053,6 +1187,14 @@ export class VisualizerPanel {
             </select>
           </div>
           <div class="view-switcher__group">
+            <label for="layoutPresetSelect">Layout</label>
+            <select id="layoutPresetSelect">
+              <option value="compact">Compact</option>
+              <option value="balanced" selected>Balanced</option>
+              <option value="relaxed">Relaxed</option>
+            </select>
+          </div>
+          <div class="view-switcher__group">
             <label for="visualizerSearchInput">Find</label>
             <input id="visualizerSearchInput" type="search" placeholder="Search keys or values" />
           </div>
@@ -1139,6 +1281,18 @@ export class VisualizerPanel {
             return undefined;
         }
         return Math.max(1, Math.floor(requested));
+    }
+
+    private getPreferredLayoutPreset(): GraphLayoutPreset {
+        const config = vscode.workspace.getConfiguration(
+            'jsonAtlas',
+            this.documentUri
+        );
+        const value = config.get<string>('graphLayoutPreset', 'balanced');
+        if (value === 'compact' || value === 'relaxed') {
+            return value;
+        }
+        return 'balanced';
     }
 }
 

@@ -175,6 +175,17 @@
                     "markdownDescription": "Maximum depth (root = 0) the visualizer auto-expands before collapsing nested nodes. Set to `0` to expand the entire document.",
                     "description": "Maximum depth (root = 0) the visualizer auto-expands before collapsing nested nodes."
                 },
+                "jsonAtlas.graphLayoutPreset": {
+                    "type": "string",
+                    "enum": [
+                        "compact",
+                        "balanced",
+                        "relaxed"
+                    ],
+                    "default": "balanced",
+                    "markdownDescription": "Default spacing preset for the visualizer graph view. `compact` squeezes nodes closer, `relaxed` spreads them out with longer connectors.",
+                    "description": "Default spacing preset for the visualizer graph view."
+                },
                 "jsonAtlas.autoGenerateSummary": {
                     "type": "boolean",
                     "default": false,

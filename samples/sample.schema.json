@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/json-atlas/sample.schema.json",
+  "title": "Telemetry Bridge Configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "name",
+    "status",
+    "owner",
+    "environments",
+    "alerts",
+    "lastDeployment"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^proj-[0-9]{3,}$",
+      "description": "Project identifier (e.g. proj-402)."
+    },
+    "name": {
+      "type": "string",
+      "minLength": 3
+    },
+    "status": {
+      "type": "string",
+      "enum": ["active", "paused", "decommissioned"]
+    },
+    "owner": {
+      "type": "object",
+      "required": ["name", "email", "teams"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 2
+        },
+        "email": {
+          "type": "string",
+          "format": "email"
+        },
+        "teams": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 2
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "environments": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/definitions/environment"
+      }
+    },
+    "alerts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/definitions/alertRule"
+      }
+    },
+    "lastDeployment": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "definitions": {
+    "environment": {
+      "type": "object",
+      "required": ["name", "url", "shards", "features"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 2
+        },
+        "url": {
+          "type": "string",
+          "format": "uri"
+        },
+        "shards": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "features": {
+          "type": "object",
+          "required": ["sampling", "rateLimitPerSecond"],
+          "additionalProperties": false,
+          "properties": {
+            "sampling": {
+              "type": "boolean"
+            },
+            "rateLimitPerSecond": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        }
+      }
+    },
+    "alertRule": {
+      "type": "object",
+      "required": ["type", "channels"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["latency", "errorRate", "throughput"]
+        },
+        "thresholdMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "thresholdPercent": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "channels": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["pager", "slack", "email"]
+          },
+          "minItems": 1
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "type": { "const": "latency" } }
+          },
+          "then": {
+            "required": ["thresholdMs"]
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "errorRate" } }
+          },
+          "then": {
+            "required": ["thresholdPercent"]
+          }
+        }
+      ]
+    }
+  }
+}

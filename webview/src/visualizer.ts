@@ -3,6 +3,7 @@
   const container = document.getElementById('visualizer');
   const status = document.getElementById('status');
   const viewSelect = document.getElementById('visualizerViewSelect');
+  const layoutPresetSelect = document.getElementById('layoutPresetSelect');
   const searchInput = document.getElementById('visualizerSearchInput');
   const chatToggle = document.getElementById('chatToggle');
   const chatPanel = document.getElementById('chatPanel');
@@ -44,6 +45,10 @@
   let depthExpandedPaths = new Set();
   let persistedState = typeof vscode.getState === 'function' ? vscode.getState() ?? {} : {};
   let nodePositionStore = persistedState.nodePositions ?? {};
+  let layoutPresetStore =
+    typeof persistedState.layoutPresets === 'object' && persistedState.layoutPresets
+      ? persistedState.layoutPresets
+      : {};
   let nodePositions = new Map();
   let currentDocumentId;
   let currentEdges = [];
@@ -80,9 +85,15 @@
   let controlsCollapsed = Boolean(persistedState.controlsCollapsed);
   let needsInitialGraphFocus = true;
   let activeModelProvider = 'openai';
+  let currentLayoutPreset: LayoutPreset = 'balanced';
+  let configDefaultLayoutPreset: LayoutPreset = 'balanced';
 
-  const NODE_GAP_X = 260;
-  const NODE_GAP_Y = 90;
+  const LAYOUT_PRESETS = {
+    compact: { gapX: 210, gapY: 70 },
+    balanced: { gapX: 260, gapY: 90 },
+    relaxed: { gapX: 330, gapY: 110 }
+  } as const;
+  type LayoutPreset = keyof typeof LAYOUT_PRESETS;
   const CANVAS_PADDING = 96;
   const MANUAL_MIN_SCALE = 0.4;
   const AUTO_MIN_SCALE = 0.02;
@@ -121,6 +132,14 @@
       '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor"><circle cx="12" cy="17" r="1.5" stroke-width="2"/><path d="M12 13v-1.5a3.5 3.5 0 1 0-3.5-3.5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>'
   };
 
+  type SchemaPointerInfo = {
+    pointer: string;
+    title?: string;
+    description?: string;
+  };
+
+  let schemaPointerIndex = new Map<string, SchemaPointerInfo>();
+
   const panState = { x: 0, y: 0, scale: 1 };
   let minScaleLimit = MANUAL_MIN_SCALE;
 
@@ -129,6 +148,15 @@
     viewSelect.addEventListener('change', (event) => {
       const next = event.target.value === 'tree' ? 'tree' : 'graph';
       setViewMode(next);
+    });
+  }
+
+  if (layoutPresetSelect instanceof HTMLSelectElement) {
+    layoutPresetSelect.value = currentLayoutPreset;
+    layoutPresetSelect.addEventListener('change', (event) => {
+      const value = event.target.value;
+      const next = normalizeLayoutPreset(value);
+      applyLayoutPreset(next);
     });
   }
 
@@ -363,24 +391,100 @@
       });
       return;
     }
+
+    if (type === 'schema:pointers') {
+      applySchemaPointers(payload);
+      rerenderFromState();
+      return;
+    }
   });
 
   vscode.postMessage({ type: 'ready' });
+
+  function applySchemaPointers(raw: Record<string, SchemaPointerInfo | undefined> | undefined) {
+    schemaPointerIndex = new Map<string, SchemaPointerInfo>();
+    if (!raw || typeof raw !== 'object') {
+      return;
+    }
+    Object.entries(raw).forEach(([path, info]) => {
+      if (!info || typeof info.pointer !== 'string') {
+        return;
+      }
+      schemaPointerIndex.set(path, {
+        pointer: info.pointer,
+        title: typeof info.title === 'string' ? info.title : undefined,
+        description: typeof info.description === 'string' ? info.description : undefined
+      });
+    });
+  }
 
   function persistState(options = { savePositions: true }) {
     if (options.savePositions !== false && currentDocumentId) {
       nodePositionStore[currentDocumentId] = serializePositions(nodePositions);
     }
 
+    const docKey = currentDocumentId ?? 'default';
+    if (docKey) {
+      layoutPresetStore[docKey] = currentLayoutPreset;
+    }
+
     persistedState = {
       ...persistedState,
       viewMode,
       nodePositions: nodePositionStore,
-      controlsCollapsed
+      controlsCollapsed,
+      layoutPresets: layoutPresetStore
     };
     if (typeof vscode.setState === 'function') {
       vscode.setState(persistedState);
     }
+  }
+
+  function applyLayoutPreset(
+    preset: LayoutPreset,
+    options: { persist?: boolean; rerender?: boolean } = {}
+  ) {
+    const normalized = normalizeLayoutPreset(preset);
+    const changed = normalized !== currentLayoutPreset;
+    currentLayoutPreset = normalized;
+
+    if (layoutPresetSelect instanceof HTMLSelectElement) {
+      layoutPresetSelect.value = normalized;
+    }
+
+    const shouldPersist = options.persist !== false;
+    if (shouldPersist) {
+      const docKey = currentDocumentId ?? 'default';
+      if (docKey) {
+        layoutPresetStore[docKey] = normalized;
+      }
+      persistState({ savePositions: false });
+    }
+
+    if (changed && options.rerender !== false) {
+      needsInitialGraphFocus = true;
+      pendingSearchFocusId = ROOT_PATH;
+      hasUserMovedView = false;
+      rerenderFromState(true);
+    }
+  }
+
+  function normalizeLayoutPreset(value: unknown): LayoutPreset {
+    if (value === 'compact' || value === 'relaxed') {
+      return value;
+    }
+    return 'balanced';
+  }
+
+  function getCurrentLayoutSpacing() {
+    return LAYOUT_PRESETS[currentLayoutPreset] ?? LAYOUT_PRESETS.balanced;
+  }
+
+  function syncLayoutPresetWithDocument() {
+    const docKey = currentDocumentId ?? 'default';
+    const stored = typeof docKey === 'string' ? layoutPresetStore[docKey] : undefined;
+    const desired = normalizeLayoutPreset(stored ?? configDefaultLayoutPreset);
+    applyLayoutPreset(desired, { persist: false, rerender: false });
   }
 
   function switchDocument(documentId) {
@@ -421,6 +525,18 @@
   function handleContainerClick(event) {
     const target = event.target;
     if (!(target instanceof HTMLElement)) {
+      return;
+    }
+
+    const schemaTarget = target.closest('[data-action="open-schema"]');
+    if (schemaTarget instanceof HTMLElement) {
+      const path = schemaTarget.getAttribute('data-path');
+      if (!path) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      vscode.postMessage({ type: 'schema:open', payload: { path } });
       return;
     }
 
@@ -466,6 +582,7 @@
       requestRename(path, currentName);
       return;
     }
+
 
     const toggle = target.closest('button[data-action="toggle"]');
     if (toggle) {
@@ -767,6 +884,10 @@
       payload && typeof payload === 'object' && 'selectionInfo' in payload ? payload.selectionInfo : undefined;
     applySelectionInfo(initialSelectionInfo);
 
+    if (payload && typeof payload === 'object' && 'schemaPointers' in payload) {
+      applySchemaPointers(payload.schemaPointers);
+    }
+
     if (payload && typeof payload === 'object') {
       if (payload.focusRoot) {
         if (viewMode !== 'graph') {
@@ -795,6 +916,9 @@
       } else if (payload.graphMaxDepth === null) {
         graphMaxDepth = undefined;
       }
+      if (typeof payload.graphLayoutPreset === 'string') {
+        configDefaultLayoutPreset = normalizeLayoutPreset(payload.graphLayoutPreset);
+      }
     }
 
     if (documentId) {
@@ -804,6 +928,7 @@
       nodePositions = new Map();
       needsInitialGraphFocus = true;
     }
+    syncLayoutPresetWithDocument();
 
     if (defaultViewMode) {
       const normalized = defaultViewMode === 'tree' ? 'tree' : 'graph';
@@ -905,6 +1030,7 @@
 
   function buildTreeBranch(key, value, path, depth) {
     const pathKey = serializePath(path);
+    const schemaInfo = schemaPointerIndex.get(pathKey);
     const entries = getChildEntries(value);
     const hasChildren = entries.length > 0;
     rememberPathDepth(pathKey, depth);
@@ -959,7 +1085,8 @@
     const descriptor = describeValue(value);
     const valueElement = createValueElement(descriptor, 'tree-node__value', {
       path: pathKey,
-      editable: canEditValueDescriptor(descriptor)
+      editable: canEditValueDescriptor(descriptor),
+      schemaPointer: schemaInfo
     });
     control.appendChild(valueElement);
 
@@ -999,9 +1126,13 @@
     const edges = [];
     let maxDepth = 0;
     let nextRow = 0;
+    const layoutSpacing = getCurrentLayoutSpacing();
+    const gapX = layoutSpacing.gapX;
+    const gapY = layoutSpacing.gapY;
 
     const traverse = (key, value, path, depth, parentId) => {
       const pathKey = serializePath(path);
+      const schemaInfo = schemaPointerIndex.get(pathKey);
       rememberPathDepth(pathKey, depth);
       const children = getChildEntries(value);
       const hasChildren = children.length > 0;
@@ -1014,11 +1145,12 @@
         key: String(key),
         descriptor: describeValue(value),
         depth,
-        x: depth * NODE_GAP_X,
+        x: depth * gapX,
         y: 0,
         hasChildren,
         isCollapsed,
-        canRename: typeof lastSegment === 'string'
+        canRename: typeof lastSegment === 'string',
+        schemaPointer: schemaInfo
       };
 
       nodes.push(node);
@@ -1029,7 +1161,7 @@
       }
 
       if (!hasChildren || isCollapsed) {
-        node.y = nextRow * NODE_GAP_Y;
+        node.y = nextRow * gapY;
         nextRow += 1;
         return node.y;
       }
@@ -1043,7 +1175,7 @@
         const bottom = childPositions[childPositions.length - 1];
         node.y = top + (bottom - top) / 2;
       } else {
-        node.y = nextRow * NODE_GAP_Y;
+        node.y = nextRow * gapY;
         nextRow += 1;
       }
 
@@ -1052,8 +1184,8 @@
 
     traverse('JSON', payload, [], 0, null);
 
-    const width = (maxDepth + 1) * NODE_GAP_X + CANVAS_PADDING * 2;
-    const height = Math.max(nextRow * NODE_GAP_Y, NODE_GAP_Y) + CANVAS_PADDING * 2;
+    const width = (maxDepth + 1) * gapX + CANVAS_PADDING * 2;
+    const height = Math.max(nextRow * gapY, gapY) + CANVAS_PADDING * 2;
 
     nodes.forEach((node) => {
       node.x += CANVAS_PADDING;
@@ -1111,10 +1243,11 @@
     connector.setAttribute('aria-hidden', 'true');
     element.appendChild(connector);
 
-    const valueElement = createValueElement(node.descriptor, 'visualizer-node__value', {
-      path: node.id,
-      editable: !node.hasChildren && canEditValueDescriptor(node.descriptor)
-    });
+      const valueElement = createValueElement(node.descriptor, 'visualizer-node__value', {
+        path: node.id,
+        editable: !node.hasChildren && canEditValueDescriptor(node.descriptor),
+        schemaPointer: node.schemaPointer
+      });
     element.appendChild(valueElement);
 
     enableNodeDragging(element, node);
@@ -1342,7 +1475,11 @@
     return true;
   }
 
-  function createValueElement(descriptor, className, options = {}) {
+  function createValueElement(
+    descriptor,
+    className,
+    options: { path?: string; editable?: boolean; schemaPointer?: SchemaPointerInfo } = {}
+  ) {
     const element = document.createElement('span');
     element.className = `${className} ${className}--${descriptor.kind}`;
     const icon = createIconElement(descriptor.icon ?? ICON_TYPES.unknown);
@@ -1380,6 +1517,10 @@
       element.title = baseTitle ? `${baseTitle}\n${editHint}` : editHint;
     }
 
+    if (options.schemaPointer && options.path) {
+      element.appendChild(createSchemaButton(options.schemaPointer, options.path));
+    }
+
     return element;
   }
 
@@ -1394,6 +1535,27 @@
       svg.setAttribute('focusable', 'false');
     }
     return span;
+  }
+
+  function createSchemaButton(schemaPointer: SchemaPointerInfo, path: string) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'value-schema-button';
+    button.dataset.action = 'open-schema';
+    button.dataset.path = path;
+    button.textContent = 'Schema';
+    const tooltipLines = [];
+    if (schemaPointer.title) {
+      tooltipLines.push(schemaPointer.title);
+    }
+    if (schemaPointer.description) {
+      tooltipLines.push(schemaPointer.description);
+    }
+    tooltipLines.push(schemaPointer.pointer ? `Pointer: ${schemaPointer.pointer}` : 'Go to schema definition');
+    button.title = tooltipLines.join('\n');
+    const pointerLabel = schemaPointer.pointer || 'schema';
+    button.setAttribute('aria-label', `Go to schema definition (${pointerLabel})`);
+    return button;
   }
 
   function truncate(value, limit = 28) {

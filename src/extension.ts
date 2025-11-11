@@ -1,7 +1,12 @@
 import { createHash } from 'crypto';
 import * as vscode from 'vscode';
 import { findNodeAtOffset, getLocation, getNodeValue, Node, parseTree, ParseError, ParseOptions, printParseErrorCode } from 'jsonc-parser';
-import { VisualizerPanel, VisualizerSelectionInfo } from './visualizerPanel';
+import {
+  GraphLayoutPreset,
+  VisualizerPanel,
+  VisualizerSchemaPointerEntry,
+  VisualizerSelectionInfo
+} from './visualizerPanel';
 import { SchemaValidator } from './schemaValidator';
 import { AiService, EditProposal } from './aiService';
 import { SummaryViewProvider } from './summaryView';
@@ -15,6 +20,7 @@ const analysisCache = new Map<string, AnalysisSnapshot>();
 const summaryCache = new Map<string, SummaryCacheEntry>();
 const selectionFragmentDocs = new Set<string>();
 const lastFocusedPathByDocument = new Map<string, string>();
+const schemaPointerCache = new Map<string, Map<string, VisualizerSchemaPointerEntry>>();
 
 let diagnostics: vscode.DiagnosticCollection;
 let aiService: AiService;
@@ -59,6 +65,8 @@ export function activate(context: vscode.ExtensionContext) {
       autoSummaryDocs.delete(key);
       autoVisualizerDocs.delete(key);
       analysisCache.delete(key);
+      schemaPointerCache.delete(key);
+      VisualizerPanel.updateSchemaPointers(document.uri, undefined);
       invalidateSummaryCacheForDocument(document.uri);
       selectionFragmentDocs.delete(key);
       lastFocusedPathByDocument.delete(key);
@@ -75,6 +83,11 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration('jsonAtlas')) {
         schemaValidator.reset();
+        const affectedUris = Array.from(schemaPointerCache.keys()).map((key) => vscode.Uri.parse(key));
+        schemaPointerCache.clear();
+        for (const uri of affectedUris) {
+          VisualizerPanel.updateSchemaPointers(uri, undefined);
+        }
         if (vscode.window.activeTextEditor) {
           void refreshDiagnostics(vscode.window.activeTextEditor.document);
         }
@@ -88,7 +101,8 @@ export function activate(context: vscode.ExtensionContext) {
         event.affectsConfiguration('jsonAtlas.defaultVisualizerView') ||
         event.affectsConfiguration('jsonAtlas.graphAutoScale') ||
         event.affectsConfiguration('jsonAtlas.graphInitialScale') ||
-        event.affectsConfiguration('jsonAtlas.graphMaxExpandedDepth')
+        event.affectsConfiguration('jsonAtlas.graphMaxExpandedDepth') ||
+        event.affectsConfiguration('jsonAtlas.graphLayoutPreset')
       ) {
         autoSummaryDocs.clear();
         autoVisualizerDocs.clear();
@@ -130,6 +144,8 @@ async function refreshDiagnostics(document: vscode.TextDocument): Promise<void> 
 
   if (analysis.errors.length) {
     analysisCache.delete(cacheKey);
+    schemaPointerCache.delete(cacheKey);
+    VisualizerPanel.updateSchemaPointers(document.uri, undefined);
     diagnostics.set(document.uri, buildDiagnosticsFromErrors(document, analysis.errors));
     const first = analysis.errors[0];
     const location = document.positionAt(first.offset);
@@ -141,11 +157,15 @@ async function refreshDiagnostics(document: vscode.TextDocument): Promise<void> 
   const snapshot: AnalysisSnapshot = { root: analysis.root, data: analysis.data };
   analysisCache.set(cacheKey, snapshot);
   const selectionPayload = buildRenderablePayload(document, snapshot, getSelectionsForDocument(document));
-  VisualizerPanel.updateIfActive(document.uri, selectionPayload.data, selectionPayload.selection);
+  VisualizerPanel.updateIfActive(document.uri, selectionPayload.data, selectionPayload.selection, {
+    schemaPointers: selectionPayload.schemaPointers,
+    layoutPreset: getConfiguredLayoutPreset(document)
+  });
   recordSelectionFragmentState(document.uri, selectionPayload.selection);
 
   const schemaIssues = await schemaValidator.validate(document, analysis.root, analysis.data);
   diagnostics.set(document.uri, schemaIssues);
+  rebuildSchemaPointers(document, analysis.root);
 }
 
 async function handleVisualizerCommand(context: vscode.ExtensionContext) {
@@ -174,7 +194,9 @@ async function handleVisualizerCommand(context: vscode.ExtensionContext) {
     selectionPayload.data,
     editor.document.uri,
     aiService,
-    selectionPayload.selection
+    selectionPayload.selection,
+    selectionPayload.schemaPointers,
+    getConfiguredLayoutPreset(editor.document)
   );
   recordSelectionFragmentState(editor.document.uri, selectionPayload.selection);
 }
@@ -518,6 +540,71 @@ function invalidateSummaryCacheForDocument(uri: vscode.Uri) {
   }
 }
 
+function rebuildSchemaPointers(document: vscode.TextDocument, root: Node | undefined) {
+  const map = buildSchemaPointerMap(document, root);
+  const key = document.uri.toString();
+  if (map) {
+    schemaPointerCache.set(key, map);
+  } else {
+    schemaPointerCache.delete(key);
+  }
+  VisualizerPanel.updateSchemaPointers(document.uri, map);
+}
+
+function buildSchemaPointerMap(
+  document: vscode.TextDocument,
+  root: Node | undefined
+): Map<string, VisualizerSchemaPointerEntry> | undefined {
+  if (!root) {
+    return undefined;
+  }
+
+  const schemaInfo = schemaValidator.getSchemaInfo(document.uri);
+  if (!schemaInfo) {
+    return undefined;
+  }
+
+  const result = new Map<string, VisualizerSchemaPointerEntry>();
+  const visit = (node: Node, path: JsonPath) => {
+    const target = schemaValidator.resolveNavigationTarget(document.uri, path);
+    if (target) {
+      result.set(encodeVisualizerPath(path), {
+        pointer: target.pointer,
+        uri: target.uri,
+        offset: target.offset,
+        length: target.length,
+        title: target.title,
+        description: target.description
+      });
+    }
+
+    if (node.type === 'object') {
+      for (const property of node.children ?? []) {
+        if (property.type !== 'property' || !property.children || property.children.length < 2) {
+          continue;
+        }
+        const keyNode = property.children[0];
+        const valueNode = property.children[1];
+        const key = extractPropertyKey(keyNode);
+        if (typeof key === 'undefined') {
+          continue;
+        }
+        visit(valueNode, path.concat([key]));
+      }
+      return;
+    }
+
+    if (node.type === 'array') {
+      (node.children ?? []).forEach((child, index) => {
+        visit(child, path.concat([index]));
+      });
+    }
+  };
+
+  visit(root, []);
+  return result.size ? result : undefined;
+}
+
 function handleSelectionChange(editor: vscode.TextEditor) {
   if (!isLintableDocument(editor.document)) {
     return;
@@ -539,7 +626,9 @@ function handleSelectionChange(editor: vscode.TextEditor) {
   if (hasSelectionFragment) {
     VisualizerPanel.updateIfActive(editor.document.uri, payload.data, payload.selection, {
       focusRoot: true,
-      resetLayout: true
+      resetLayout: true,
+      schemaPointers: payload.schemaPointers,
+      layoutPreset: getConfiguredLayoutPreset(editor.document)
     });
     recordSelectionFragmentState(editor.document.uri, payload.selection);
     return;
@@ -548,7 +637,9 @@ function handleSelectionChange(editor: vscode.TextEditor) {
   if (showingFragment) {
     VisualizerPanel.updateIfActive(editor.document.uri, analysis.data, undefined, {
       focusRoot: true,
-      resetLayout: true
+      resetLayout: true,
+      schemaPointers: payload.schemaPointers,
+      layoutPreset: getConfiguredLayoutPreset(editor.document)
     });
     recordSelectionFragmentState(editor.document.uri, undefined);
   }
@@ -642,6 +733,15 @@ function getDocumentName(document: vscode.TextDocument): string {
   return document.uri.fsPath.split(/[\\/]/).pop() ?? document.uri.path;
 }
 
+function getConfiguredLayoutPreset(document: vscode.TextDocument): GraphLayoutPreset {
+  const config = vscode.workspace.getConfiguration('jsonAtlas', document.uri);
+  const value = config.get<string>('graphLayoutPreset', 'balanced');
+  if (value === 'compact' || value === 'relaxed') {
+    return value;
+  }
+  return 'balanced';
+}
+
 function log(message: string) {
   if (!outputChannel) {
     return;
@@ -687,20 +787,22 @@ function buildRenderablePayload(
   document: vscode.TextDocument,
   analysis: AnalysisSnapshot,
   selections?: readonly vscode.Selection[]
-): { data: unknown; selection?: VisualizerSelectionInfo } {
+): { data: unknown; selection?: VisualizerSelectionInfo; schemaPointers?: Map<string, VisualizerSchemaPointerEntry> } {
+  const schemaPointers = schemaPointerCache.get(document.uri.toString());
   const ranges = normalizeSelections(document, selections);
   if (!ranges.length || !analysis.root) {
-    return { data: analysis.data };
+    return { data: analysis.data, schemaPointers };
   }
 
   const fragment = extractSelectionFragment(analysis.root, ranges);
   if (typeof fragment === 'undefined') {
-    return { data: analysis.data };
+    return { data: analysis.data, schemaPointers };
   }
 
   return {
     data: fragment,
-    selection: buildSelectionSummary(ranges)
+    selection: buildSelectionSummary(ranges),
+    schemaPointers
   };
 }
 
